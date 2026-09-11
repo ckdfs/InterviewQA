@@ -1,0 +1,24 @@
+{
+  "name": "interview-qa",
+  "version": "1.0.0",
+  "description": "面试问答助手：录制电脑播放的声音 → MiMo ASR 边录边转 → DeepSeek V4.1 Flash 结合简历流式作答",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js",
+    "test-stt": ".venv/Scripts/python.exe stt/test_transcribe.py",
+    "selftest": "node start.js --selftest",
+    "test:context": "node test-resume-context.js",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac"
+  },
+  "author": "ckdfs",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "pdf-parse": "^2.4.5"
+  }
+}

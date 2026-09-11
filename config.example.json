@@ -1,0 +1,47 @@
+{
+  "deepseekApiKey": "",
+  "deepseekBaseUrl": "https://api.deepseek.com",
+  "deepseekModel": "deepseek-flash",
+  "stt": {
+    "engine": "mimo",
+    "fallbackToLocal": false,
+    "maxConcurrent": 4,
+    "mimo": {
+      "apiKey": "",
+      "baseUrl": "https://api.xiaomimimo.com/v1",
+      "model": "mimo-v2.5-asr",
+      "language": "zh",
+      "timeoutMs": 30000
+    }
+  },
+  "whisper": {
+    "model": "small",
+    "computeType": "int8",
+    "device": "cpu",
+    "workers": 3,
+    "threads": 6,
+    "language": "zh",
+    "beamSize": 1,
+    "initialPrompt": "以下是一段普通话的面试问题或对话，请准确转写为简体中文。"
+  },
+  "chunk": {
+    "targetSeconds": 8,
+    "maxSeconds": 14,
+    "overlapSeconds": 1.5,
+    "silenceThresholdRms": 0.006,
+    "silenceSeconds": 0.35,
+    "tailMinPartSeconds": 4,
+    "tailMaxParts": 1
+  },
+  "resume": {
+    "enabled": true,
+    "contextMode": "smart",
+    "defaultInject": "none",
+    "reasoningEffort": "low"
+  },
+  "answer": {
+    "maxChars": 200,
+    "historyTurns": 3,
+    "temperature": 0.7
+  }
+}

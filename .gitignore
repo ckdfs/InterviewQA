@@ -1,0 +1,31 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# 含 API Key，禁止提交（用 config.example.json 代替，或用环境变量覆盖）
+config.json
+.env
+
+# 个人材料：简历原文与解析出的档案都属于隐私，不进仓库
+resume/*.pdf
+resume/*.doc
+resume/*.docx
+resume/*.txt
+resume/*.md
+resume/.resume-meta.json
+!resume/README.md
+
+# 本地工作笔记（含个人信息），不进仓库
+.workbuddy/
+
+stt/test_sample.*
+stt/tts_log.txt
+
+# 打包产物
+dist/
+build/
+release/
+*.log
+
+.DS_Store
