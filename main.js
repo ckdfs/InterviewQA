@@ -1,67 +1,65 @@
-const { app, BrowserWindow, ipcMain, session, desktopCapturer } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  session,
+  desktopCapturer,
+  dialog,
+  Menu,
+  shell,
+  systemPreferences,
+} = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const https = require('https');
 const { URL } = require('url');
 const { spawn } = require('child_process');
-const { loadResume } = require('./resume');
+const { loadResume, findSources, resumeCacheUsable } = require('./resume');
 const { buildResumeContext } = require('./resume-context');
+const { ConfigStore } = require('./config');
 
 const APP_ROOT = __dirname;
+const IS_MAC = process.platform === 'darwin';
+const IS_WIN = process.platform === 'win32';
 const SAMPLE_RATE = 16000;
 const BYTES_PER_SAMPLE = 2;
 const TMP_DIR = path.join(os.tmpdir(), 'interviewqa');
+const SUPPORTED_RESUME_EXTS = ['pdf', 'txt', 'md', 'markdown'];
 
 /**
  * 开发与打包两种模式下的「可写目录」：
  * - 开发：直接用项目目录（config.json、resume/ 都在项目里）
- * - 打包：app.asar 是只读的，配置与简历放到系统用户目录（Windows: %APPDATA%\InterviewQA；macOS: ~/Library/Application Support/InterviewQA）
+ * - 打包：app.asar 是只读的，配置与简历放到系统用户目录
+ *   Windows: %APPDATA%\InterviewQA
+ *   macOS:   ~/Library/Application Support/InterviewQA
  */
-const USER_DIR = app.isPackaged ? app.getPath('userData') : APP_ROOT;
-const CONFIG_PATH = path.join(USER_DIR, 'config.json');
-const RESUME_DIR = path.join(USER_DIR, 'resume');
+const store = new ConfigStore({
+  appRoot: APP_ROOT,
+  userDir: app.isPackaged ? app.getPath('userData') : APP_ROOT,
+  isPackaged: app.isPackaged,
+});
 
-/** 读取配置：优先用户目录的 config.json，缺失则从随包的 config.example.json 生成 */
-function loadConfig() {
-  let raw = null;
-  if (fs.existsSync(CONFIG_PATH)) {
-    raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-  } else if (fs.existsSync(path.join(APP_ROOT, 'config.example.json'))) {
-    raw = fs.readFileSync(path.join(APP_ROOT, 'config.example.json'), 'utf8');
-    try {
-      fs.mkdirSync(USER_DIR, { recursive: true });
-      fs.writeFileSync(CONFIG_PATH, raw, 'utf8');
-      console.log(`[配置] 已生成 ${CONFIG_PATH}，请填入 API Key`);
-    } catch (err) {
-      console.log(`[配置] 无法写入配置文件：${err.message}`);
-    }
-  } else {
-    raw = '{}';
-  }
+const USER_DIR = store.userDir;
+const CONFIG_PATH = store.file;
+const RESUME_DIR = store.dir;
 
-  const config = JSON.parse(raw);
-  // 环境变量优先（CI / 自动化部署时无需改文件）
-  if (process.env.DEEPSEEK_API_KEY) config.deepseekApiKey = process.env.DEEPSEEK_API_KEY;
-  if (process.env.MIMO_API_KEY) {
-    config.stt = config.stt || {};
-    config.stt.mimo = config.stt.mimo || {};
-    config.stt.mimo.apiKey = process.env.MIMO_API_KEY;
-  }
-  // 简历目录与档案缓存固定放在可写目录（打包后是用户目录）
-  config.resume = config.resume || {};
-  config.resume.dir = RESUME_DIR;
-  config.resume.profileFile = path.join(RESUME_DIR, 'profile.md');
-  return config;
+let CONFIG = store.get();
+
+/** 设置保存后重新取一份，并同步派生状态（例如切回本地引擎就绪判定） */
+function refreshConfig() {
+  CONFIG = store.get();
+  return CONFIG;
 }
 
-const CONFIG = loadConfig();
-
-// 本应用只有普通界面，关掉硬件加速：部分机器上 GPU 进程反复崩溃会导致应用直接退出
-app.disableHardwareAcceleration();
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-gpu-compositing');
-app.commandLine.appendSwitch('in-process-gpu');
+// 只有 Windows 需要关掉硬件加速（部分机器 GPU 进程反复崩溃会导致应用直接退出）。
+// macOS 的 GPU 进程稳定，关掉硬件加速反而让滚动和动画变卡，因此保持默认。
+if (IS_WIN) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('in-process-gpu');
+}
 
 const BASE_SYSTEM_PROMPT = `你是资深面试官兼求职教练。用户会给你一段面试问题（文本来自语音识别，可能有错别字，请先自行理解并纠正）。
 请针对问题给出一段能直接说出口的面试作答参考，要求：
@@ -199,6 +197,21 @@ function mergeWithOverlapDedupe(a, b) {
 
 // ---------------------------------------------------------------- 转写 worker 池
 
+/**
+ * 本地 Whisper 引擎的 Python 解释器位置。
+ * Windows 的 venv 在 .venv/Scripts/python.exe，macOS / Linux 在 .venv/bin/python3。
+ * 打包版不带虚拟环境，此时返回 null，由调用方给出明确提示。
+ */
+function localPythonPath() {
+  const candidates = IS_WIN
+    ? [path.join(APP_ROOT, '.venv', 'Scripts', 'python.exe')]
+    : [
+        path.join(APP_ROOT, '.venv', 'bin', 'python3'),
+        path.join(APP_ROOT, '.venv', 'bin', 'python'),
+      ];
+  return candidates.find((file) => fs.existsSync(file)) || null;
+}
+
 class SttWorker {
   constructor(index, pool, cfg) {
     this.index = index;
@@ -206,8 +219,22 @@ class SttWorker {
     this.ready = false;
     this.task = null;
     this.buffer = '';
-    const python = path.join(APP_ROOT, '.venv', 'Scripts', 'python.exe');
-    this.proc = spawn(python, [path.join(APP_ROOT, 'stt', 'worker.py')], {
+    this.failed = false;
+    this.python = localPythonPath();
+
+    const script = path.join(APP_ROOT, 'stt', 'worker.py');
+    if (!this.python) {
+      throw new Error(
+        IS_WIN
+          ? '未找到本地语音引擎（.venv\\Scripts\\python.exe）。本地引擎需要先在项目目录创建 Python 虚拟环境并安装 faster-whisper。'
+          : '未找到本地语音引擎（.venv/bin/python3）。本地引擎需要先在项目目录创建 Python 虚拟环境并安装 faster-whisper。'
+      );
+    }
+    if (!fs.existsSync(script)) {
+      throw new Error('缺少本地语音引擎脚本 stt/worker.py');
+    }
+
+    this.proc = spawn(this.python, [script], {
       cwd: APP_ROOT,
       env: {
         ...process.env,
@@ -223,12 +250,24 @@ class SttWorker {
       const text = data.toString().trim();
       if (text) console.log(`[stt-${index}] ${text.slice(0, 300)}`);
     });
+    // 必须监听 error：否则 spawn 失败会抛出未捕获的 Error 事件
+    this.proc.on('error', (err) => {
+      this.failed = true;
+      this.ready = false;
+      console.error(`[stt-${index}] 进程启动失败：${err.message}`);
+      send('error', { message: `本地语音引擎启动失败：${err.message}` });
+      const task = this.task;
+      this.task = null;
+      if (task) task.cb('', `本地语音引擎启动失败：${err.message}`);
+      this.pool.onWorkerFailed(this);
+    });
     this.proc.on('exit', (code) => {
       console.log(`[stt-${index}] 进程退出 code=${code}`);
       this.ready = false;
       const task = this.task;
       this.task = null;
       if (task) task.cb('', '转写进程异常退出');
+      this.pool.onWorkerFailed(this);
     });
 
     this.proc.stdin.write(JSON.stringify({ whisper: cfg.whisper }) + '\n');
@@ -288,27 +327,42 @@ class WorkerPool {
     this.queue = [];
     this.workers = [];
     this.readyCount = 0;
+    this.deadCount = 0;
     const size = Math.max(1, cfg.whisper.workers || 1);
     for (let i = 0; i < size; i++) this.workers.push(new SttWorker(i, this, cfg));
   }
 
+  /** 至少一个 worker 可用即可开始转写 */
   get ready() {
-    return this.readyCount >= this.workers.length;
+    return this.readyCount > 0;
+  }
+
+  /** 所有 worker 都已有结果（就绪或已失败） */
+  get settled() {
+    return this.readyCount + this.deadCount >= this.workers.length;
   }
 
   onWorkerReady() {
     this.readyCount++;
     // 惰性启动（云端引擎失败后回退）时不要干扰当前状态提示
-    if (((CONFIG.stt && CONFIG.stt.engine) || 'local') !== 'local') {
-      if (this.ready) console.log('[stt] 本地 worker 已就绪（备用）');
+    if (((CONFIG.stt && CONFIG.stt.engine) || 'mimo') !== 'local') {
+      if (this.settled) console.log('[stt] 本地 worker 已就绪（备用）');
       return;
     }
-    if (this.ready) {
+    if (this.readyCount >= this.workers.length) {
       console.log('[stt] 全部 worker 就绪');
       setStatus('idle', '语音模型就绪，点击录音开始');
-    } else {
+    } else if (!this.settled) {
       setStatus('loading', `正在加载语音模型（${this.readyCount}/${this.workers.length}）…`);
     }
+  }
+
+  onWorkerFailed() {
+    this.deadCount++;
+    if (this.ready) return; // 还有别的 worker 能干活，不影响使用
+    if (!this.settled) return;
+    console.error('[stt] 本地 worker 全部启动失败');
+    setStatus('idle', '本地语音引擎不可用，请在设置里改用云端识别');
   }
 
   submit(task) {
@@ -330,16 +384,29 @@ class WorkerPool {
 }
 
 let pool = null;
+let poolError = null;
 
 function ensureLocalPool() {
-  if (!pool) pool = new WorkerPool(CONFIG);
+  if (pool || poolError) return pool;
+  try {
+    pool = new WorkerPool(CONFIG);
+  } catch (err) {
+    poolError = err.message;
+    console.error(`[stt] 本地引擎不可用：${poolError}`);
+    send('error', { message: poolError });
+  }
   return pool;
 }
 
 /** 本地 Whisper 转写（按需惰性启动 worker） */
 function localTranscribe(wavPath) {
   return new Promise((resolve, reject) => {
-    ensureLocalPool().submit({
+    const activePool = ensureLocalPool();
+    if (!activePool) {
+      reject(new Error(poolError || '本地语音引擎不可用'));
+      return;
+    }
+    activePool.submit({
       id: `${Date.now()}-${Math.random()}`,
       wav: wavPath,
       cb: (text, error) => (error ? reject(new Error(error)) : resolve(text)),
@@ -427,10 +494,14 @@ function pumpAsr() {
 }
 
 async function runAsrTask(task) {
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'local';
+  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
   const fallback = CONFIG.stt ? CONFIG.stt.fallbackToLocal !== false : true;
   try {
     if (engine === 'mimo') {
+      if (!store.hasMimoKey()) {
+        task.cb('', '未配置 MiMo ASR API Key，请在设置里补齐后再录音');
+        return;
+      }
       try {
         task.cb(await mimoTranscribe(task.wavPath), null);
         return;
@@ -590,13 +661,18 @@ let currentAnswerAbort = null; // 中断时用于立即结束流式等待，避�
 
 /**
  * 用 Node 原生 https 发起流式请求（不走 Chromium 网络栈，避免 Electron 网络服务异常时卡住）。
- * 每收到一段增量文本就回调 onDelta。
+ *
+ * reasoningEffort 必须显式下发：deepseek-flash 默认会先生成一两千字思考内容，
+ * 首个正文要等 4 秒以上；置为 none 后首字降到 0.6 秒左右，面试场景才可用。
+ * 模型仍吐出思考内容时通过 onReasoning 上报，界面据此显示进度而不是空窗。
  */
-function streamChatCompletions(baseUrl, key, model, messages, temperature, onDelta) {
+function streamChatCompletions(baseUrl, key, model, messages, temperature, reasoningEffort, onDelta, onReasoning) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${baseUrl}/chat/completions`);
-    const body = JSON.stringify({ model, messages, stream: true, temperature });
-    console.log(`[请求] ${url.hostname}${url.pathname} model=${model}`);
+    const payload = { model, messages, stream: true, temperature };
+    if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
+    const body = JSON.stringify(payload);
+    console.log(`[请求] ${url.hostname}${url.pathname} model=${model} reasoning_effort=${reasoningEffort || '默认'}`);
     const req = https.request(
       {
         hostname: url.hostname,
@@ -638,6 +714,7 @@ function streamChatCompletions(baseUrl, key, model, messages, temperature, onDel
                 continue;
               }
               const delta = json.choices && json.choices[0] && json.choices[0].delta;
+              if (delta && delta.reasoning_content && onReasoning) onReasoning(delta.reasoning_content);
               if (delta && delta.content) onDelta(delta.content);
             }
           }
@@ -669,7 +746,7 @@ function streamChatCompletions(baseUrl, key, model, messages, temperature, onDel
 function askDeepSeekOnce(system, user, maxTokens = 8000) {
   return new Promise((resolve, reject) => {
     const key = CONFIG.deepseekApiKey;
-    if (!key || !key.startsWith('sk-')) return reject(new Error('未配置 DeepSeek API Key'));
+    if (!store.hasDeepSeekKey()) return reject(new Error('未配置 DeepSeek API Key'));
     const url = new URL(`${CONFIG.deepseekBaseUrl}/chat/completions`);
     const body = JSON.stringify({
       model: CONFIG.deepseekModel,
@@ -725,6 +802,25 @@ async function initResume() {
       fs.mkdirSync(RESUME_DIR, { recursive: true });
       console.log(`[简历] 已创建简历目录：${RESUME_DIR}`);
     }
+    if (CONFIG.resume.enabled === false) {
+      state.resumeText = '';
+      setResumeStatus({ state: 'disabled', dir: RESUME_DIR });
+      return;
+    }
+
+    const profilePath = CONFIG.resume.profileFile || path.join(RESUME_DIR, 'profile.md');
+    // 还没有 Key 时不要发起解析（必然失败），但已有可用缓存就照常复用
+    if (!store.hasDeepSeekKey() && !resumeCacheUsable(RESUME_DIR, profilePath)) {
+      state.resumeText = '';
+      setResumeStatus({
+        state: 'pending',
+        dir: RESUME_DIR,
+        sources: listResumeSources().map((item) => item.name),
+        message: '填写 DeepSeek API Key 后会自动解析简历',
+      });
+      return;
+    }
+
     const result = await loadResume({
       appRoot: APP_ROOT,
       config: CONFIG,
@@ -732,7 +828,8 @@ async function initResume() {
       log: console.log,
     });
     if (!result) {
-      setResumeStatus({ state: 'none', dir: RESUME_DIR });
+      state.resumeText = '';
+      setResumeStatus({ state: 'none', dir: RESUME_DIR, sources: [] });
       return;
     }
     state.resumeText = result.profile;
@@ -742,10 +839,13 @@ async function initResume() {
       cached: result.cached,
       name: match ? match[1] : null,
       source: result.source ? path.basename(result.source) : 'profile.md',
+      sources: (result.sources || []).map((file) => path.basename(file)),
+      dir: RESUME_DIR,
     });
   } catch (err) {
     console.error(`[简历] 处理失败：${err.message}`);
-    setResumeStatus({ state: 'error', message: err.message });
+    state.resumeText = '';
+    setResumeStatus({ state: 'error', message: err.message, dir: RESUME_DIR });
   }
 }
 
@@ -757,8 +857,8 @@ async function generateAnswer(question) {
   send('answer:start', { question });
 
   const { deepseekApiKey: key, deepseekBaseUrl: baseUrl, deepseekModel: model, answer } = CONFIG;
-  if (!key || !key.startsWith('sk-')) {
-    send('error', { message: '未配置 DeepSeek API Key，请在 config.json 中填写' });
+  if (!store.hasDeepSeekKey()) {
+    send('error', { message: '还没有配置 DeepSeek API Key，点右上角「设置」补齐后即可作答' });
     setStatus('idle', '缺少 API Key');
     return;
   }
@@ -770,15 +870,32 @@ async function generateAnswer(question) {
 
   let full = '';
   let deltaCount = 0;
+  let reasoningSeen = 0;
   const startedAt = Date.now();
   try {
-    await streamChatCompletions(baseUrl, key, model, messages, (answer && answer.temperature) || 0.7, (delta) => {
-      full += delta;
-      deltaCount++;
-      state.deltaCount = deltaCount;
-      if (deltaCount === 1) console.log(`[首个增量] ${Date.now() - startedAt}ms`);
-      send('answer:delta', { text: delta });
-    });
+    const reasoningEffort = (answer && answer.reasoningEffort) || 'none';
+    await streamChatCompletions(
+      baseUrl,
+      key,
+      model,
+      messages,
+      (answer && answer.temperature) || 0.7,
+      reasoningEffort,
+      (delta) => {
+        full += delta;
+        deltaCount++;
+        state.deltaCount = deltaCount;
+        if (deltaCount === 1) console.log(`[首个增量] ${Date.now() - startedAt}ms`);
+        send('answer:delta', { text: delta });
+      },
+      () => {
+        reasoningSeen++;
+        if (reasoningSeen === 1) {
+          console.log(`[思考内容] 首个 ${Date.now() - startedAt}ms`);
+          setStatus('thinking', '模型正在梳理思路，正文马上开始…');
+        }
+      }
+    );
   } catch (err) {
     state.answering = false;
     if (state.answerAborted) {
@@ -820,30 +937,35 @@ ipcMain.handle('status:get', () => currentStatus);
 ipcMain.handle('resume:get', () => currentResumeStatus);
 
 ipcMain.handle('resume:reload', async () => {
-  // 手动重新解析（换简历文件后可用）：先让缓存失效，再重新解析
+  // 手动重新解析（换简历文件后可用）：先让缓存失效，再重新解析。
+  // profileFile 在打包后是绝对路径，不能再用 path.join(APP_ROOT, ...) 拼。
   try {
-    const profilePath = path.join(
-      APP_ROOT,
-      (CONFIG.resume && CONFIG.resume.profileFile) || path.join('resume', 'profile.md')
-    );
+    const profilePath = (CONFIG.resume && CONFIG.resume.profileFile) || path.join(RESUME_DIR, 'profile.md');
     const metaPath = path.join(path.dirname(profilePath), '.resume-meta.json');
     if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
   } catch (err) {
     /* ignore */
   }
   state.resumeText = '';
-  setResumeStatus({ state: 'parsing' });
+  setResumeStatus({ state: 'parsing', dir: RESUME_DIR });
   await initResume();
   return currentResumeStatus;
 });
 
-/** 当前转写引擎是否可用（云端引擎随开随用，本地引擎要等 worker 加载完模型） */
+/** 当前转写引擎是否可用：云端引擎看 Key，本地引擎看 worker 是否加载完模型 */
 function sttReady() {
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'local';
-  if (engine === 'mimo') {
-    return !!(CONFIG.stt && CONFIG.stt.mimo && CONFIG.stt.mimo.apiKey);
-  }
+  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
+  if (engine === 'mimo') return store.hasMimoKey();
   return !!(pool && pool.ready);
+}
+
+/** 录音前的可用性检查，返回可直接展示给用户的原因 */
+function recordingBlockReason() {
+  if (!store.hasDeepSeekKey()) return '还没有配置 DeepSeek API Key，点右上角「设置」补齐';
+  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
+  if (engine === 'mimo' && !store.hasMimoKey()) return '还没有配置 MiMo 语音识别 API Key，点右上角「设置」补齐';
+  if (engine === 'local' && !(pool && pool.ready)) return '本地语音引擎还在加载，请稍候几秒';
+  return null;
 }
 
 ipcMain.handle('question:submit', async (_event, text) => {
@@ -873,14 +995,232 @@ function abortAnswer() {
 ipcMain.handle('answer:abort', () => ({ ok: abortAnswer() }));
 
 ipcMain.handle('recording:start', () => {
-  if (!sttReady()) {
-    return { ok: false, message: '语音识别还在准备中，请稍候几秒' };
-  }
+  const blocked = recordingBlockReason();
+  if (blocked) return { ok: false, message: blocked, needsSetup: store.needsSetup() };
   resetSession();
   state.recording = true;
   setStatus('recording', '正在录制电脑播放的声音…');
   return { ok: true };
 });
+
+/**
+ * 系统声音采集是否具备前提条件。
+ * macOS 上屏幕录制权限是硬前提：没有授权时 desktopCapturer 拿不到任何音源，
+ * 表现成「点了录音没有任何反应」，所以这里提前查权限并给出可操作的指引。
+ */
+function capturePrerequisite() {
+  if (!IS_MAC) return null;
+  const status = systemPreferences.getMediaAccessStatus('screen');
+  if (status === 'granted') return null;
+  return {
+    denied: true,
+    status,
+    message:
+      status === 'not-determined'
+        ? '首次使用需要授予「屏幕录制」权限才能采集电脑正在播放的声音。请在系统设置中勾选本应用，然后重新打开应用。'
+        : '「屏幕录制」权限被拒绝，无法采集电脑播放的声音。请到「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用，然后重新打开应用。',
+  };
+}
+
+ipcMain.handle('capture:status', () => {
+  const block = capturePrerequisite();
+  return block || { granted: true };
+});
+
+ipcMain.handle('capture:openPrivacy', () => {
+  if (!IS_MAC) return { ok: false };
+  const urls = {
+    screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  };
+  const target = urls.screen;
+  shell.openExternal(target).catch(() => {});
+  return { ok: true, url: target };
+});
+
+// ---------------------------------------------------------------- 引导与设置
+
+/** 当前简历目录里的源文件（不含解析产物） */
+function listResumeSources() {
+  const profilePath = (CONFIG.resume && CONFIG.resume.profileFile) || path.join(RESUME_DIR, 'profile.md');
+  return findSources(RESUME_DIR, [profilePath]).map((file) => {
+    const stat = fs.statSync(file);
+    return { name: path.basename(file), size: stat.size, mtimeMs: stat.mtimeMs };
+  });
+}
+
+/** 把用户选中的简历文件复制进简历目录（重名时加序号，避免覆盖已有材料） */
+function importResumeFiles(files) {
+  fs.mkdirSync(RESUME_DIR, { recursive: true });
+  const added = [];
+  for (const src of files) {
+    const ext = path.extname(src).toLowerCase();
+    if (!SUPPORTED_RESUME_EXTS.includes(ext.replace('.', ''))) continue;
+    let target = path.join(RESUME_DIR, path.basename(src));
+    let seq = 1;
+    while (fs.existsSync(target) && path.resolve(target) !== path.resolve(src)) {
+      target = path.join(RESUME_DIR, `${path.basename(src, ext)}-${seq++}${ext}`);
+    }
+    if (path.resolve(target) !== path.resolve(src)) fs.copyFileSync(src, target);
+    added.push(path.basename(target));
+  }
+  return added;
+}
+
+function resumeStateView() {
+  return {
+    sources: listResumeSources(),
+    dir: RESUME_DIR,
+    profilePath: (CONFIG.resume && CONFIG.resume.profileFile) || path.join(RESUME_DIR, 'profile.md'),
+    hasProfile: fs.existsSync((CONFIG.resume && CONFIG.resume.profileFile) || path.join(RESUME_DIR, 'profile.md')),
+    supported: SUPPORTED_RESUME_EXTS,
+  };
+}
+
+/** 引导页面初始状态：缺什么、权限怎么样、简历目录在哪 */
+function setupState() {
+  const privacy = capturePrerequisite();
+  return {
+    needsSetup: store.needsSetup(),
+    setupDone: !!(CONFIG.ui && CONFIG.ui.setupDone),
+    deepseekKeySet: store.hasDeepSeekKey(),
+    mimoKeySet: store.hasMimoKey(),
+    platform: process.platform,
+    appVersion: app.getVersion(),
+    resume: resumeStateView(),
+    privacy,
+  };
+}
+
+/** 保存设置后统一刷新：重载配置、按需重启本地引擎、重新解析简历 */
+async function applySettings(patch) {
+  const result = store.update(patch);
+  if (!result.ok) return { ok: false, message: result.message, view: store.safeView() };
+
+  const before = CONFIG;
+  refreshConfig();
+
+  if (before.stt.engine !== CONFIG.stt.engine) {
+    if (CONFIG.stt.engine === 'local') {
+      setStatus('loading', '正在加载本地语音模型…');
+      ensureLocalPool();
+    } else if (pool) {
+      console.log('[stt] 已切换到云端引擎，本地 worker 保持待命');
+    }
+  }
+  if (before.deepseekApiKey !== CONFIG.deepseekApiKey) warmUpConnection();
+  if (before.resume.enabled !== CONFIG.resume.enabled) await initResume();
+
+  return { ok: true, view: store.safeView(), resume: resumeStateView() };
+}
+
+ipcMain.handle('setup:get', () => setupState());
+
+ipcMain.handle('setup:save', async (_event, patch) => applySettings(patch));
+
+ipcMain.handle('setup:finish', () => {
+  store.markSetupDone();
+  refreshConfig();
+  console.log('[启动] 初始化设置完成');
+  return { ok: true, setup: setupState() };
+});
+
+ipcMain.handle('setup:pickResume', async () => {
+  const result = await dialog.showOpenDialog(win, {
+    title: '选择个人简历文件',
+    message: `支持 ${SUPPORTED_RESUME_EXTS.map((e) => `.${e}`).join(' / ')}，可多选（例如简历 + 成绩单）`,
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '简历材料', extensions: SUPPORTED_RESUME_EXTS },
+      { name: '全部文件', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true, resume: resumeStateView() };
+  const added = importResumeFiles(result.filePaths);
+  state.resumeText = '';
+  setResumeStatus({ state: 'parsing', dir: RESUME_DIR });
+  initResume();
+  return { ok: true, added, resume: resumeStateView() };
+});
+
+ipcMain.handle('settings:get', () => ({ ...store.safeView(), resume: resumeStateView(), privacy: capturePrerequisite() }));
+
+ipcMain.handle('settings:save', async (_event, patch) => applySettings(patch));
+
+ipcMain.handle('settings:resumeRemove', async (_event, name) => {
+  const target = path.join(RESUME_DIR, path.basename(String(name || '')));
+  if (!target.startsWith(RESUME_DIR) || !fs.existsSync(target)) return { ok: false, message: '文件不存在' };
+  try {
+    fs.unlinkSync(target);
+  } catch (err) {
+    return { ok: false, message: `删除失败：${err.message}` };
+  }
+  // 源文件变了，档案缓存同步失效，下次解析会重新生成
+  const metaPath = path.join(RESUME_DIR, '.resume-meta.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      fs.unlinkSync(metaPath);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+  state.resumeText = '';
+  setStatus('idle', '已移除简历材料，正在重新整理背景档案…');
+  await initResume();
+  return { ok: true, resume: resumeStateView() };
+});
+
+ipcMain.handle('settings:revealResumeDir', () => {
+  fs.mkdirSync(RESUME_DIR, { recursive: true });
+  shell.openPath(RESUME_DIR);
+  return { ok: true, dir: RESUME_DIR };
+});
+
+ipcMain.handle('settings:revealConfig', () => {
+  if (fs.existsSync(CONFIG_PATH)) shell.showItemInFolder(CONFIG_PATH);
+  else shell.openPath(USER_DIR);
+  return { ok: true, path: CONFIG_PATH };
+});
+
+/** 连接自检：只打 DeepSeek 的 /models（不消耗 token），验证 Key 与网络 */
+ipcMain.handle('settings:testDeepSeek', () => {
+  return new Promise((resolve) => {
+    if (!store.hasDeepSeekKey()) return resolve({ ok: false, message: '请先填写 DeepSeek API Key' });
+    const url = new URL(`${CONFIG.deepseekBaseUrl}/models`);
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: url.pathname,
+        method: 'GET',
+        agent: keepAliveAgent,
+        headers: { Authorization: `Bearer ${CONFIG.deepseekApiKey}` },
+      },
+      (res) => {
+        res.resume();
+        if (res.statusCode === 200) return resolve({ ok: true, message: 'DeepSeek 连接正常' });
+        if (res.statusCode === 401) return resolve({ ok: false, message: 'DeepSeek API Key 无效（401）' });
+        resolve({ ok: false, message: `DeepSeek 返回 HTTP ${res.statusCode}` });
+      }
+    );
+    req.on('error', (err) => resolve({ ok: false, message: `无法连接 DeepSeek：${err.message}` }));
+    req.setTimeout(10000, () => req.destroy(new Error('连接超时')));
+    req.end();
+  });
+});
+
+ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  arch: process.arch,
+  packaged: app.isPackaged,
+  configPath: CONFIG_PATH,
+  resumeDir: RESUME_DIR,
+  userDir: USER_DIR,
+  engine: (CONFIG.stt && CONFIG.stt.engine) || 'mimo',
+  localEngineAvailable: !app.isPackaged && !!localPythonPath(),
+}));
+
 
 function handlePcm(chunk) {
   state.pending = Buffer.concat([state.pending, chunk]);
@@ -983,36 +1323,90 @@ function runSelfTest() {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 940,
-    height: 760,
-    minWidth: 640,
-    minHeight: 520,
+    width: 960,
+    height: 780,
+    minWidth: 680,
+    minHeight: 560,
     title: '面试问答助手',
-    backgroundColor: '#f5f6f8',
+    backgroundColor: '#f4f5f7',
+    show: false,
     webPreferences: {
       preload: path.join(APP_ROOT, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      spellcheck: false,
     },
   });
+  win.once('ready-to-show', () => win.show());
   win.loadFile(path.join(APP_ROOT, 'renderer', 'index.html'));
+  win.on('closed', () => {
+    win = null;
+  });
+}
+
+/**
+ * macOS 上没有应用菜单就没有可用的快捷键：复制、粘贴、全选、退出全部失效。
+ * Windows / Linux 保持默认菜单（含 F12 等开发工具入口）。
+ */
+function applyAppMenu() {
+  if (!IS_MAC) {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  const template = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about', label: '关于 面试问答助手' },
+        { type: 'separator' },
+        { role: 'hide', label: '隐藏' },
+        { role: 'hideOthers', label: '隐藏其他' },
+        { role: 'unhide', label: '全部显示' },
+        { type: 'separator' },
+        { role: 'quit', label: '退出' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize', label: '最小化' },
+        { role: 'zoom', label: '缩放' },
+        { role: 'front', label: '前置全部窗口' },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 /** 启动时预热到 DeepSeek 的连接（不消耗 token），后续首次提问可省去握手时间 */
 function warmUpConnection() {
   const key = CONFIG.deepseekApiKey;
-  if (!key || !key.startsWith('sk-')) return;
+  if (!store.hasDeepSeekKey()) return;
+  const url = new URL(`${CONFIG.deepseekBaseUrl}/models`);
   const req = https.request(
     {
-      hostname: 'api.deepseek.com',
-      path: '/models',
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: url.pathname,
       method: 'GET',
       agent: keepAliveAgent,
       headers: { Authorization: `Bearer ${key}` },
     },
     (res) => {
       console.log(`[预热] DeepSeek 连接就绪 HTTP ${res.statusCode}`);
-      if (res.statusCode === 401) send('error', { message: 'DeepSeek API Key 无效，请检查 config.json' });
+      if (res.statusCode === 401) send('error', { message: 'DeepSeek API Key 无效，请在设置里更新' });
       res.resume();
     }
   );
@@ -1020,35 +1414,63 @@ function warmUpConnection() {
   req.end();
 }
 
-app.whenReady().then(() => {
-  // 允许直接采集系统声音（Windows WASAPI 回环），不弹屏幕选择框
+/**
+ * 授予系统声音采集权限。
+ * - Windows：WASAPI 回环，直接给整屏音源；
+ * - macOS 13+：Electron 39 内置 CoreAudio Tap，同样用 audio: 'loopback'，
+ *   前提是 Info.plist 里有 NSAudioCaptureUsageDescription 并且已授予屏幕录制权限。
+ */
+function installDisplayMediaHandler() {
   session.defaultSession.setDisplayMediaRequestHandler(
     async (request, callback) => {
       try {
         const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        if (!sources.length) {
+          console.error('[音频] 未取得任何屏幕音源，通常是屏幕录制权限未授予');
+          callback({});
+          return;
+        }
         callback({ video: sources[0], audio: 'loopback' });
       } catch (err) {
-        callback({ video: 'screen', audio: 'loopback' });
+        console.error(`[音频] 获取系统音源失败：${err.message}`);
+        callback({});
       }
     },
     { useSystemPicker: false }
   );
+}
+
+app.whenReady().then(() => {
+  installDisplayMediaHandler();
+  applyAppMenu();
 
   if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
   createWindow();
 
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'local';
-  if (engine === 'local') {
+  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
+  if (store.needsSetup()) {
+    // 首次启动：由渲染进程弹出引导，先把 Key 和简历补齐再进入使用
+    setStatus('idle', '先完成初始化设置，再开始使用');
+    console.log('[启动] 检测到尚未完成初始化，等待引导设置');
+  } else if (engine === 'local') {
     setStatus('loading', '正在加载本地语音模型…');
-    pool = new WorkerPool(CONFIG);
+    ensureLocalPool();
   } else {
-    // 云端引擎随开随用，不必等本地模型加载
     setStatus('idle', '就绪，点击录音开始或直接在下方输入问题');
     console.log(`[stt] 使用云端引擎：${(CONFIG.stt.mimo && CONFIG.stt.mimo.model) || 'mimo'}`);
   }
   warmUpConnection();
   initResume(); // 异步：首次解析简历，之后复用缓存，不阻塞界面
   if (process.argv.includes('--selftest')) runSelfTest();
+});
+
+// macOS 关掉窗口不退出应用，点 Dock 图标要能重新开窗，否则用户会以为应用卡死
+app.on('window-all-closed', () => {
+  if (!IS_MAC) app.quit();
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
 app.on('before-quit', () => {

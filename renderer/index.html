@@ -1,58 +1,318 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-page-node-id="rcxvXPWowPv4x8UPGETfxT">
-  <head data-page-node-id="MIboSSbWyjLycxYHO4LxWt">
-    <meta charset="UTF-8" data-page-node-id="9u1hPyruGxEKixL4eOBQBM" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="f6aTTiRF5D7ZoIAtgI9YwX" />
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'"
+    />
     <title>面试问答助手</title>
-    <link rel="stylesheet" href="style.css" data-page-node-id="JrGJABBZCNCuE7l3sqJs2B" />
+    <link rel="stylesheet" href="style.css" />
   </head>
-  <body data-page-node-id="Ep5z18JBLF1X1ROpcuO7kV">
-    <header class="topbar" data-page-node-id="SU2yPuM3CX6tcqEGxDWnP9">
-      <div class="brand" data-page-node-id="iRf56TktQMnu8FgOadPoP5">
-        <div class="logo" data-page-node-id="VRD0mvDsAuP80Od3DKSCqv">面</div>
-        <div class="brand-text" data-page-node-id="vH4eXBeOeZJv7e6N3ay1GP">
-          <h1 data-page-node-id="1tE9k5Oe7BG3JsFGsu0jCu">面试问答助手</h1>
-          <p id="statusText" class="status" data-page-node-id="GVpMkAZdgiyyT5yt4RtiEs">正在初始化…</p>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">面</div>
+        <div class="brand-text">
+          <h1>面试问答助手</h1>
+          <p id="statusText" class="status">正在初始化…</p>
         </div>
       </div>
-      <div class="right-meta">
-        <span id="resumeBadge" class="resume-badge" title="简历背景资料状态"></span>
-        <span class="meta" data-page-node-id="9WDd5If4wk0uTLjvzC8mEv">系统声音录制 · MiMo-V2.5-ASR 边录边转 · DeepSeek V4.1 Flash</span>
+      <div class="topbar-actions">
+        <button id="resumeBadge" class="badge badge-neutral" type="button" title="简历背景资料状态"></button>
+        <button id="settingsBtn" class="icon-btn" type="button" title="设置" aria-label="设置">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path
+              d="M10 6.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Zm0 5.3a1.9 1.9 0 1 1 0-3.8 1.9 1.9 0 0 1 0 3.8Z"
+            />
+            <path
+              d="M17.1 11.2c.06-.4.09-.8.09-1.2s-.03-.8-.09-1.2l1.5-1.15a.5.5 0 0 0 .12-.64l-1.42-2.46a.5.5 0 0 0-.6-.22l-1.77.71a6.9 6.9 0 0 0-2.08-1.2l-.27-1.88A.5.5 0 0 0 12.1 1H9.26a.5.5 0 0 0-.49.42l-.27 1.88a6.9 6.9 0 0 0-2.08 1.2L4.65 3.8a.5.5 0 0 0-.6.22L2.63 6.48a.5.5 0 0 0 .12.64l1.5 1.15c-.06.4-.09.8-.09 1.2s.03.8.09 1.2l-1.5 1.15a.5.5 0 0 0-.12.64l1.42 2.46c.13.22.4.31.6.22l1.77-.71c.64.5 1.35.9 2.08 1.2l.27 1.88c.04.24.25.42.49.42h2.84c.24 0 .45-.18.49-.42l.27-1.88a6.9 6.9 0 0 0 2.08-1.2l1.77.71c.2.09.47 0 .6-.22l1.42-2.46a.5.5 0 0 0-.12-.64l-1.5-1.15Z"
+            />
+          </svg>
+        </button>
       </div>
     </header>
 
-    <main id="chat" class="chat" data-page-node-id="4WCR04EPZ2l14jOnMgZNQU">
-      <div class="empty" id="emptyTip" data-page-node-id="iFnHqqwjAfNOQOiFjpDub3">
-        <div class="empty-icon" data-page-node-id="VLtj2S2uYXptj1GR9cLVJW">🎧</div>
-        <p data-page-node-id="2XYCkJ6H6gi14ua5B9JHQZ">点击底部按钮，开始录制电脑正在播放的面试问题</p>
-        <p class="sub" data-page-node-id="1OYnKV8z6qMeJnaLBwwFXM">录音会实时转成文字，停止后立刻由 DeepSeek 给出约 100 字的作答参考；也可以直接输入问题</p>
+    <main id="chat" class="chat">
+      <div class="empty" id="emptyTip">
+        <div class="empty-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48">
+            <path
+              d="M24 10a9 9 0 0 0-9 9v5a9 9 0 0 0 18 0v-5a9 9 0 0 0-9-9Zm-3.5 9a3.5 3.5 0 0 1 7 0v5a3.5 3.5 0 0 1-7 0v-5Z"
+            />
+            <path d="M11 21h2.5v3a10.5 10.5 0 0 0 21 0v-3H37v3a13 13 0 0 1-11.5 12.9V41h-3v-4.1A13 13 0 0 1 11 24v-3Z" />
+          </svg>
+        </div>
+        <p class="empty-title">开始录制电脑正在播放的面试问题</p>
+        <p class="empty-sub">
+          音频会边录边转成文字，点「结束这一段」后由 DeepSeek 结合你的简历流式给出作答参考；也可以直接在下方输入问题。
+        </p>
       </div>
     </main>
 
-    <footer class="bottombar" data-page-node-id="K7v8LgGJ5x1oDGcvEwMaTD">
-      <div class="level-wrap" id="levelWrap" data-page-node-id="IYkB6YbmQlC7g6CfEmCDHV">
-        <div class="level-bar" id="levelBar" data-page-node-id="O5i4Hzy0OL7w4MIYsiNVTG"></div>
-      </div>
-
-      <div class="input-row" data-page-node-id="Mf6jallXxUXtp8amHuCLVR">
+    <footer class="bottombar">
+      <div class="input-row">
         <input
           id="questionInput"
-          class="question-input"
+          class="input"
           type="text"
-          placeholder="也可以直接输入面试问题，回车发送…"
-          autocomplete="off" data-page-node-id="52U08CaHK8USd7luCbClTo"
+          placeholder="直接输入面试问题，回车发送"
+          autocomplete="off"
+          spellcheck="false"
         />
-        <button id="sendBtn" class="send-btn" disabled data-page-node-id="7I8v7QbEuKga17umO2iRsx">发送</button>
+        <button id="sendBtn" class="btn btn-primary" type="button" disabled>发送</button>
       </div>
 
-      <div class="action-row" data-page-node-id="MJ3y4RjjqGarBk5XxICZW6">
-        <button id="recordBtn" class="record-btn" disabled data-page-node-id="5wvVW03V8Ly3pcKeyUQFVz">
-          <span class="dot" data-page-node-id="NngE63qg73krcw1hADZ6st"></span>
-          <span id="recordBtnText" data-page-node-id="8HaQ2FzoGaFgGVkaAb8N8h">模型加载中…</span>
+      <div class="recorder">
+        <div class="level" id="levelWrap" aria-hidden="true"><div class="level-bar" id="levelBar"></div></div>
+        <button id="recordBtn" class="record-btn" type="button" disabled>
+          <span class="record-dot" aria-hidden="true"></span>
+          <span id="recordBtnText">准备中…</span>
         </button>
-        <p class="hint" id="hintText" data-page-node-id="8wwqxE7Z6GKgvIWzV9uOgQ">首次启动需要下载并加载语音模型</p>
+        <p class="hint" id="hintText"></p>
       </div>
     </footer>
+
+    <!-- ---------------------------------------------------------- 首次启动引导 -->
+    <div class="overlay" id="setupOverlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+        <div class="modal-head">
+          <h2 id="setupTitle">初始化设置</h2>
+          <p id="setupSubtitle">三步完成配置后即可开始使用</p>
+        </div>
+
+        <ol class="steps" id="setupSteps">
+          <li class="step is-active" data-step="1"><span>1</span>模型服务</li>
+          <li class="step" data-step="2"><span>2</span>个人简历</li>
+          <li class="step" data-step="3"><span>3</span>录音权限</li>
+        </ol>
+
+        <div class="modal-body">
+          <!-- 步骤 1 -->
+          <section class="pane is-active" data-pane="1">
+            <p class="pane-lead">
+              本应用不自带模型额度，需要填写你自己的 API Key。密钥只保存在本机用户目录，不会上传到任何第三方。
+            </p>
+
+            <div class="field">
+              <label for="setupDeepseekKey">
+                DeepSeek API Key
+                <span class="req">必填</span>
+              </label>
+              <input id="setupDeepseekKey" class="input" type="password" placeholder="sk-…" spellcheck="false" />
+              <p class="field-hint">用于生成面试作答参考。在 DeepSeek 开放平台创建，形如 sk-xxxxxxxx。</p>
+            </div>
+
+            <div class="field">
+              <label for="setupMimoKey">
+                MiMo ASR API Key
+                <span class="req">录音必填</span>
+              </label>
+              <input id="setupMimoKey" class="input" type="password" placeholder="填写后即可录制电脑声音" spellcheck="false" />
+              <p class="field-hint">用于把系统声音转成文字。不填也可以使用，但只能手动输入问题。</p>
+            </div>
+
+            <div class="inline-row">
+              <button id="setupTestBtn" class="btn btn-ghost" type="button">测试连接</button>
+              <button id="setupAdvancedBtn" class="btn-link" type="button">高级选项</button>
+              <span id="setupTestResult" class="inline-note"></span>
+            </div>
+
+            <div class="advanced" id="setupAdvanced" hidden>
+              <div class="field">
+                <label for="setupDeepseekBase">DeepSeek 接口地址</label>
+                <input id="setupDeepseekBase" class="input" type="text" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="setupMimoBase">MiMo 接口地址</label>
+                <input id="setupMimoBase" class="input" type="text" spellcheck="false" />
+              </div>
+            </div>
+          </section>
+
+          <!-- 步骤 2 -->
+          <section class="pane" data-pane="2">
+            <p class="pane-lead">
+              选择你的简历文件，回答会结合其中的真实经历，而不是泛泛而谈。支持 PDF / TXT / MD，可以一次选多份（例如简历 + 成绩单）。
+            </p>
+
+            <div class="pick-row">
+              <button id="setupPickBtn" class="btn btn-secondary" type="button">选择简历文件…</button>
+              <button id="setupSkipResumeBtn" class="btn-link" type="button">暂时跳过</button>
+            </div>
+
+            <div class="resume-list" id="setupResumeList"></div>
+
+            <p class="field-hint" id="setupResumeHint">
+              文件会被复制到本机应用数据目录，只有你自己能访问；原始文件保持不动。
+            </p>
+          </section>
+
+          <!-- 步骤 3 -->
+          <section class="pane" data-pane="3">
+            <p class="pane-lead" id="setupPrivacyLead">正在检查系统声音采集权限…</p>
+            <div class="callout" id="setupPrivacyCallout" hidden>
+              <div class="callout-body">
+                <strong id="setupPrivacyTitle">需要授予屏幕录制权限</strong>
+                <p id="setupPrivacyText"></p>
+              </div>
+              <button id="setupPrivacyBtn" class="btn btn-secondary" type="button">打开系统设置</button>
+            </div>
+            <ul class="check-list" id="setupCheckList"></ul>
+          </section>
+        </div>
+
+        <div class="modal-foot">
+          <button id="setupSkipBtn" class="btn-link" type="button">先跳过，稍后在设置里配置</button>
+          <div class="modal-foot-right">
+            <button id="setupPrevBtn" class="btn btn-ghost" type="button">上一步</button>
+            <button id="setupNextBtn" class="btn btn-primary" type="button">下一步</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------- 设置抽屉 -->
+    <div class="drawer-mask" id="drawerMask" hidden></div>
+    <aside class="drawer" id="settingsDrawer" hidden aria-label="设置">
+      <div class="drawer-head">
+        <h2>设置</h2>
+        <button id="settingsCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M5.3 4.3 4.3 5.3 9 10l-4.7 4.7 1 1L10 11l4.7 4.7 1-1L11 10l4.7-4.7-1-1L10 9 5.3 4.3Z" />
+          </svg>
+        </button>
+      </div>
+
+      <nav class="tabs" id="settingsTabs">
+        <button class="tab is-active" type="button" data-tab="api">模型服务</button>
+        <button class="tab" type="button" data-tab="answer">回答与识别</button>
+        <button class="tab" type="button" data-tab="resume">简历材料</button>
+        <button class="tab" type="button" data-tab="about">关于</button>
+      </nav>
+
+      <div class="drawer-body">
+        <section class="tabpane is-active" data-tabpane="api">
+          <div class="field">
+            <label for="setDeepseekKey">DeepSeek API Key</label>
+            <input id="setDeepseekKey" class="input" type="password" placeholder="留空表示保持当前密钥" spellcheck="false" />
+            <p class="field-hint" id="setDeepseekKeyState"></p>
+          </div>
+          <div class="field">
+            <label for="setDeepseekBase">DeepSeek 接口地址</label>
+            <input id="setDeepseekBase" class="input" type="text" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="setDeepseekModel">DeepSeek 模型名</label>
+            <input id="setDeepseekModel" class="input" type="text" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="setMimoKey">MiMo ASR API Key</label>
+            <input id="setMimoKey" class="input" type="password" placeholder="留空表示保持当前密钥" spellcheck="false" />
+            <p class="field-hint" id="setMimoKeyState"></p>
+          </div>
+          <div class="field">
+            <label for="setMimoBase">MiMo 接口地址</label>
+            <input id="setMimoBase" class="input" type="text" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="setMimoModel">MiMo 模型名</label>
+            <input id="setMimoModel" class="input" type="text" spellcheck="false" />
+          </div>
+          <div class="inline-row">
+            <button id="setTestBtn" class="btn btn-ghost" type="button">测试 DeepSeek 连接</button>
+            <span id="setTestResult" class="inline-note"></span>
+          </div>
+        </section>
+
+        <section class="tabpane" data-tabpane="answer">
+          <div class="field">
+            <label for="setMaxChars">回答字数上限</label>
+            <input id="setMaxChars" class="input" type="number" min="80" max="800" step="10" />
+            <p class="field-hint">建议 180~230，正好是一段能说出口的回答。</p>
+          </div>
+          <div class="field">
+            <label for="setHistory">携带历史轮数</label>
+            <input id="setHistory" class="input" type="number" min="0" max="10" step="1" />
+            <p class="field-hint">让追问能接上上文，调大更连贯但更费额度。</p>
+          </div>
+          <div class="field">
+            <label for="setReasoning">思考深度</label>
+            <select id="setReasoning" class="input">
+              <option value="none">关闭（最快，首字约 0.6 秒，推荐面试用）</option>
+              <option value="minimal">极简（首字约 2.6 秒）</option>
+              <option value="low">低（首字约 4 秒）</option>
+              <option value="medium">中</option>
+              <option value="high">高（质量更好，等待明显变长）</option>
+            </select>
+            <p class="field-hint">思考链越长作答越周详，但会推迟正文出现的时间。</p>
+          </div>
+          <div class="field">
+            <label for="setContextMode">简历注入策略</label>
+            <select id="setContextMode" class="input">
+              <option value="smart">智能判断（八股题不注入，经历题只注入相关片段）</option>
+              <option value="all">总是注入完整档案</option>
+              <option value="none">从不注入简历</option>
+            </select>
+          </div>
+          <label class="switch-row">
+            <input id="setResumeEnabled" type="checkbox" />
+            <span>启用简历背景</span>
+          </label>
+
+          <hr class="sep" />
+
+          <div class="field">
+            <label for="setEngine">语音识别引擎</label>
+            <select id="setEngine" class="input">
+              <option value="mimo">云端 MiMo ASR（推荐，随开随用）</option>
+              <option value="local">本地 Whisper（需自建 Python 环境）</option>
+            </select>
+            <p class="field-hint" id="setEngineHint"></p>
+          </div>
+          <div class="field">
+            <label for="setTargetSeconds">切片时长（秒）</label>
+            <input id="setTargetSeconds" class="input" type="number" min="3" max="20" step="1" />
+            <p class="field-hint">越小越实时，但请求次数更多。</p>
+          </div>
+          <div class="field">
+            <label for="setMaxSeconds">单段硬上限（秒）</label>
+            <input id="setMaxSeconds" class="input" type="number" min="5" max="40" step="1" />
+          </div>
+          <div class="field">
+            <label for="setSilence">静音判定阈值</label>
+            <input id="setSilence" class="input" type="number" min="0.0005" max="0.2" step="0.0005" />
+            <p class="field-hint">录不到声音时调小，误切太多时调大。</p>
+          </div>
+        </section>
+
+        <section class="tabpane" data-tabpane="resume">
+          <p class="pane-lead">回答会结合这里的材料。支持 PDF / TXT / MD，可多份并存。</p>
+          <div class="pick-row">
+            <button id="setPickResumeBtn" class="btn btn-secondary" type="button">添加简历文件…</button>
+            <button id="setReloadResumeBtn" class="btn btn-ghost" type="button">重新解析</button>
+            <button id="setOpenDirBtn" class="btn btn-ghost" type="button">打开目录</button>
+          </div>
+          <div class="resume-list" id="setResumeList"></div>
+        </section>
+
+        <section class="tabpane" data-tabpane="about">
+          <dl class="kv" id="aboutList"></dl>
+          <div class="inline-row">
+            <button id="aboutConfigBtn" class="btn btn-ghost" type="button">打开配置位置</button>
+            <button id="aboutResumeBtn" class="btn btn-ghost" type="button">打开简历目录</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="drawer-foot">
+        <span class="inline-note" id="settingsNote"></span>
+        <button id="settingsSaveBtn" class="btn btn-primary" type="button">保存设置</button>
+      </div>
+    </aside>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
 
     <script src="app.js"></script>
   </body>

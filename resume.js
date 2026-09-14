@@ -43,6 +43,7 @@ const PARSE_SYSTEM_PROMPT = `把用户提供的候选人原始材料（可能同
 /**
  * 找出目录里所有简历源文件（按修改时间从新到旧）。
  * exclude 用于排除解析产物本身（profile.md），否则会被当成源文件反复自我解析。
+ * 目录说明文件（README）不是简历材料，一并排除。
  * 支持同时放多份材料（例如「简历 + 成绩单」），会一起交给模型整理。
  */
 function findSources(dir, exclude = []) {
@@ -50,7 +51,8 @@ function findSources(dir, exclude = []) {
   const excluded = exclude.map((p) => path.resolve(p));
   const files = fs
     .readdirSync(dir)
-    .filter((name) => !name.startsWith('.') && SOURCE_EXTS.includes(path.extname(name).toLowerCase()))
+    .filter((name) => !name.startsWith('.') && !/^readme\.(md|txt|markdown)$/i.test(name))
+    .filter((name) => SOURCE_EXTS.includes(path.extname(name).toLowerCase()))
     .map((name) => path.join(dir, name))
     .filter((file) => !excluded.includes(path.resolve(file)));
   files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
@@ -185,4 +187,14 @@ async function loadResume({ appRoot, config, ask, log = console.log }) {
   return { profile, source: sources[0], sources, cached: false };
 }
 
-module.exports = { loadResume, findSource, extractText };
+/**
+ * 现有缓存是否可以直接用（不需要调用模型）。
+ * 用于「还没填 API Key 但此前已解析过」的场景：此时仍应复用旧档案。
+ */
+function resumeCacheUsable(dir, profilePath) {
+  const sources = findSources(dir, [profilePath]);
+  if (!sources.length) return fs.existsSync(profilePath);
+  return cacheMatchesSource(profilePath, sources);
+}
+
+module.exports = { loadResume, findSource, findSources, extractText, resumeCacheUsable };

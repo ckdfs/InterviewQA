@@ -1,18 +1,29 @@
 {
   "name": "interview-qa",
-  "version": "1.0.0",
-  "description": "面试问答助手：录制电脑播放的声音 → MiMo ASR 边录边转 → DeepSeek V4.1 Flash 结合简历流式作答",
+  "productName": "InterviewQA",
+  "version": "1.1.0",
+  "description": "面试问答助手：录制电脑播放的声音 → MiMo ASR 边录边转 → DeepSeek 结合简历流式作答",
   "main": "main.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node start.js",
-    "test-stt": ".venv/Scripts/python.exe stt/test_transcribe.py",
+    "icon": "node scripts/launch.js --script scripts/make-icon.js",
     "selftest": "node start.js --selftest",
     "test:context": "node test-resume-context.js",
+    "test:resume": "node scripts/check-resume-pipeline.js",
+    "test:stt": "node scripts/run-stt-test.js",
+    "test:ui": "node scripts/launch.js --script scripts/ui-check.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win --x64",
-    "build:mac": "electron-builder --mac"
+    "build:mac": "electron-builder --mac --arm64 --x64",
+    "build:mac:arm64": "electron-builder --mac --arm64",
+    "build:mac:x64": "electron-builder --mac --x64",
+    "build:dir": "electron-builder --dir"
   },
-  "author": "ckdfs",
+  "author": "InterviewQA",
   "license": "MIT",
   "devDependencies": {
     "electron": "^39.2.7",

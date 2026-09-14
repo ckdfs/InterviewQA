@@ -4,70 +4,250 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 不做证书自动发现：托管 runner 上没有开发者证书，自动发现只会拖慢构建。
+  # 需要正式签名时，在仓库 Secrets 里配置 CSC_LINK / CSC_KEY_PASSWORD。
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # 先把静态检查、简历链路自检与界面冒烟测试跑一遍，
+  # 把「改了代码但没跑起来」这类问题挡在打包之前，不浪费构建机时间
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
+
+      - name: 语法检查
+        run: |
+          for file in main.js config.js preload.js resume.js resume-context.js \
+                      start.js test-resume-context.js scripts/*.js; do
+            echo "检查 $file"
+            node --check "$file"
+          done
+
+      - name: 简历注入策略自测
+        run: node test-resume-context.js
 
       - name: 安装依赖
         run: npm ci
 
-      - name: 打包 Windows 绿色版（portable exe）
-        run: npm run build:win
+      - name: 简历链路自检（解析 / 缓存 / 失效 / 注入）
+        run: npm run test:resume
 
-      - uses: actions/upload-artifact@v4
+      - name: 界面冒烟测试（引导向导 + 设置面板）
+        run: |
+          sudo apt-get update -qq
+          # Electron 在无显示环境下运行需要的库；不同 Ubuntu 版本包名不同，逐个容错安装
+          for pkg in xvfb libnss3 libgtk-3-0t64 libgtk-3-0 libasound2t64 libasound2 \
+                     libatk-bridge2.0-0t64 libatk-bridge2.0-0 libatspi2.0-0t64 libatspi2.0-0 \
+                     libgbm1 libxss1 libcups2t64 libcups2; do
+            sudo apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true
+          done
+          xvfb-run -a node scripts/launch.js --script scripts/ui-check.js -- --no-sandbox
+
+  build-windows:
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          name: InterviewQA-windows
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 打包 Windows 免安装版
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: 校验产物
+        shell: bash
+        run: |
+          ls -lh dist
+          count=$(ls dist/*.exe 2>/dev/null | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::没有生成 .exe 产物"
+            exit 1
+          fi
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: InterviewQA-windows-x64
           path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      # 失败时把 electron-builder 的有效配置与调试信息留下，便于定位
+      - name: 上传诊断信息
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-windows
+          path: |
+            dist/*.yml
+            dist/*.yaml
+            dist/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-mac:
-    runs-on: macos-latest
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            artifact: mac-arm64
+          - arch: x64
+            artifact: mac-x64
+    runs-on: macos-14
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
       - name: 安装依赖
         run: npm ci
 
-      - name: 打包 macOS 便携版（zip）+ dmg
-        run: npm run build:mac
+      - name: 打包 macOS（${{ matrix.arch }}）
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
 
-      - uses: actions/upload-artifact@v4
+      - name: 校验产物与签名
+        run: |
+          ls -lh dist
+          for kind in dmg zip; do
+            if ! ls dist/*.$kind >/dev/null 2>&1; then
+              echo "::error::没有生成 .$kind 产物"
+              exit 1
+            fi
+          done
+          APP="dist/mac-${{ matrix.arch }}/InterviewQA.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::没有找到 $APP"
+            exit 1
+          fi
+          echo "== 权限声明 =="
+          plutil -p "$APP/Contents/Info.plist" | grep -E "NSAudioCaptureUsageDescription|NSMicrophoneUsageDescription|LSMinimumSystemVersion|CFBundleIdentifier"
+          echo "== 代码签名 =="
+          codesign -dv "$APP" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier"
+          # 签名无效的包在 Apple Silicon 上会被 Gatekeeper 判为「已损坏」，
+          # 这一步把问题直接挡在发布之前。
+          codesign --verify --verbose=2 "$APP"
+
+      # 个人材料绝不能进分发包。这里直接断言 app.asar 的实际内容，
+      # 比只检查配置里的 files 白名单更可靠——配置对不代表打出来的包就对。
+      - name: 断言包内不含个人材料
+        run: |
+          APP="dist/mac-${{ matrix.arch }}/InterviewQA.app"
+          npx asar list "$APP/Contents/Resources/app.asar" > /tmp/asar-list.txt
+          echo "== 顶层内容 =="
+          grep -vE "^/node_modules" /tmp/asar-list.txt
+
+          for pattern in "/resume/" "/config.json" "\.pdf$" "\.docx$"; do
+            if grep -qE "$pattern" /tmp/asar-list.txt; then
+              echo "::error::包内出现不该有的内容：$pattern"
+              exit 1
+            fi
+          done
+
+          mkdir -p /tmp/asar-dump
+          npx asar extract "$APP/Contents/Resources/app.asar" /tmp/asar-dump
+          if grep -rilE "sk-[a-z0-9]{20}" /tmp/asar-dump; then
+            echo "::error::包内检出疑似 API Key"
+            exit 1
+          fi
+          echo "包内未发现个人材料与密钥"
+
+      # 分发包「能签名」不等于「能启动」：未签名或权限键缺失时应用会在启动阶段就退出。
+      # 这里真跑一次打包后的二进制，断言它进入引导分支。
+      - name: 冒烟启动打包应用
+        run: |
+          BIN="dist/mac-${{ matrix.arch }}/InterviewQA.app/Contents/MacOS/InterviewQA"
+          rm -f /tmp/app-start.log
+          "$BIN" > /tmp/app-start.log 2>&1 &
+          PID=$!
+          sleep 12
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          echo "== 启动日志 =="
+          cat /tmp/app-start.log
+          if ! grep -q "\[启动\]" /tmp/app-start.log; then
+            echo "::error::打包后的应用没有进入启动流程，分发包不可用"
+            exit 1
+          fi
+          echo "== 首次启动判定 =="
+          grep -q "尚未完成初始化" /tmp/app-start.log \
+            && echo "干净环境下正确进入引导流程" \
+            || echo "::warning::未命中首次启动分支，请确认 runner 上没有残留的用户数据"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
         with:
-          name: InterviewQA-macos
+          name: InterviewQA-${{ matrix.artifact }}
           path: |
-            dist/*.zip
             dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 上传诊断信息
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.artifact }}
+          path: |
+            dist/*.yml
+            dist/*.yaml
+            dist/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-windows, build-mac]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: 发布到 Releases
+      - name: 列出待发布文件
+        run: ls -lh artifacts
+
+      - name: 创建 GitHub Release 并附上安装包
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.exe
-            artifacts/*.zip
             artifacts/*.dmg
+            artifacts/*.zip
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

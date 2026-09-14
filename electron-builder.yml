@@ -1,50 +1,91 @@
-appId: com.ckdfs.interviewqa
+appId: com.interviewqa.desktop
 productName: InterviewQA
-copyright: Copyright © 2026 ckdfs
+copyright: Copyright © 2026 InterviewQA
 
 directories:
   output: dist
+  buildResources: build
 
-# 只打包运行必需的文件：不打包 .venv、node_modules 里的开发依赖、个人简历材料
+# 只打包运行必需的文件。
+# resume/ 与 config.json 属于使用者个人材料，绝不进包；
+# 打包版的配置与简历固定落在系统用户目录（Windows: %APPDATA%\InterviewQA，
+# macOS: ~/Library/Application Support/InterviewQA）。
 files:
   - main.js
+  - config.js
   - preload.js
   - resume.js
   - resume-context.js
   - package.json
   - config.example.json
   - renderer/**/*
-  - resume/README.md
   - stt/**/*.py
+  - "!**/*.map"
+  - "!**/*.d.ts"
+  - "!**/*.md"
+  - "!**/{LICENSE,LICENCE,CHANGELOG,NOTICE}*"
+  - "!**/{test,tests,__tests__,spec,coverage,example,examples,docs}/**"
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+
+npmRebuild: false
+compression: maximum
+
+# Electron 自带几十套界面语言包，每套约 1.3MB。本应用只用中文与英文，其余剔除。
+electronLanguages:
+  - zh-CN
+  - zh-TW
+  - en
+  - en-US
+
+afterPack: scripts/after-pack.js
 
 win:
   target:
     - target: portable
       arch:
         - x64
-  artifactName: InterviewQA-${version}-win-portable.${ext}
-
-mac:
-  target:
-    - target: zip
-      arch:
-        - x64
-        - arm64
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-  category: public.app-category.productivity
-  identity: null # 无 Apple 开发者证书时不要尝试签名（签名需自备证书并在 CI 配 CSC_* 密钥）
-  artifactName: InterviewQA-${version}-mac-${arch}.${ext}
+  artifactName: ${productName}-${version}-win-x64-portable.${ext}
 
 portable:
-  artifactName: InterviewQA-${version}-win-portable.${ext}
+  artifactName: ${productName}-${version}-win-x64-portable.${ext}
   requestExecutionLevel: user
+  unpackDirName: InterviewQA
+
+mac:
+  category: public.app-category.productivity
+  # 不在这里写死 arch：写死会覆盖命令行 --arm64 / --x64，导致每个矩阵任务都构建两个架构。
+  # 架构由 npm scripts 与 CI 矩阵显式指定。
+  target:
+    - dmg
+    - zip
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  darkModeSupport: true
+  minimumSystemVersion: "13.0"
+  # 默认不做代码签名（签名需自备证书并在 CI 配 CSC_LINK / CSC_KEY_PASSWORD）。
+  # 未配证书时由 scripts/after-pack.js 补 ad-hoc 签名，保证分发包能正常启动。
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    CFBundleDisplayName: 面试问答助手
+    CFBundleName: InterviewQA
+    LSMinimumSystemVersion: "13.0"
+    NSHighResolutionCapable: true
+    # macOS 13+ 采集系统声音走 CoreAudio Tap，缺这两个键会拿到一条没有声音的死流
+    NSAudioCaptureUsageDescription: 用于采集电脑正在播放的声音并转成文字，生成面试作答参考。
+    NSMicrophoneUsageDescription: 用于采集音频并转成文字，生成面试作答参考。
 
 dmg:
-  artifactName: InterviewQA-${version}-mac-${arch}.${ext}
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
   writeUpdateInfo: false
-
-asar: true
-npmRebuild: false
+  contents:
+    - x: 150
+      y: 190
+      type: file
+    - x: 400
+      y: 190
+      type: link
+      path: /Applications

@@ -22,10 +22,10 @@ resume/.resume-meta.json
 stt/test_sample.*
 stt/tts_log.txt
 
-# 打包产物
+# 打包产物（build/ 是 electron-builder 的资源目录，图标要进仓库，不忽略）
 dist/
-build/
 release/
 *.log
+!build/icon.png
 
 .DS_Store
