@@ -96,14 +96,21 @@ git tag v1.1.0 && git push --tags
 
 ```bash
 npm run selftest      # 用 stt/test_sample.wav 模拟一次录音，跑通切片 → 转写 → 拼接 → 回答 → 中断
-npm run test:context  # 简历注入策略自测（纯本地关键词判定，不外呼）
+npm run test:context  # 简历注入策略自测：默认用合成档案夹具，对 20 条问题断言注入模式（纯本地关键词判定，不外呼）
 npm run test:resume   # 简历链路自检：PDF 提取、源文件识别、首次解析、缓存命中与失效、无 Key 时复用缓存
 npm run test:ui       # 界面冒烟测试：元素引用、引导向导、设置面板、保存字段白名单
 npm run test:stt      # 本地 Whisper 链路自测（需先建好 .venv）
 ```
 
 以上四项都不联网、不需要 API Key，可直接在 CI 里跑；PDF 夹具由 `scripts/mini-pdf.js`
-在运行时手写生成，仓库里不放二进制样本，也不依赖任何个人材料。
+在运行时手写生成，注入策略自测用 `scripts/fixtures/sample-profile.md` 这份合成档案，
+仓库里既不放二进制样本，也不依赖任何个人材料。
+
+想用自己的档案看判定效果（只打印、不断言）：
+
+```bash
+node test-resume-context.js --profile resume/profile.md
+```
 
 `stt/test_sample.wav` 是 6.5 秒的普通话问句，长度对齐真实切片（默认 8 秒）。云端 ASR 对
 2 秒级的短语音会把技术术语听错（实测「进程和线程」在短句上有约两成概率被听成「近程和远程」），
