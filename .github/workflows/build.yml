@@ -48,8 +48,27 @@ jobs:
       - name: 转写拼接自测
         run: npm run test:merge
 
+      # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
+      # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/Library/Caches/electron
+            ~/AppData/Local/electron/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: 安装依赖
-        run: npm ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then exit 0; fi
+            echo "第 $attempt 次安装依赖失败，稍后重试"
+            sleep 15
+          done
+          echo "::error::安装依赖连续三次失败"
+          exit 1
 
       - name: 简历链路自检（解析 / 缓存 / 失效 / 注入）
         run: npm run test:resume
@@ -77,8 +96,27 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
+      # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/Library/Caches/electron
+            ~/AppData/Local/electron/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: 安装依赖
-        run: npm ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then exit 0; fi
+            echo "第 $attempt 次安装依赖失败，稍后重试"
+            sleep 15
+          done
+          echo "::error::安装依赖连续三次失败"
+          exit 1
 
       - name: 打包 Windows 免安装版
         run: npx electron-builder --win --x64 --publish never
@@ -134,8 +172,27 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
+      # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/Library/Caches/electron
+            ~/AppData/Local/electron/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: 安装依赖
-        run: npm ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then exit 0; fi
+            echo "第 $attempt 次安装依赖失败，稍后重试"
+            sleep 15
+          done
+          echo "::error::安装依赖连续三次失败"
+          exit 1
 
       - name: 打包 macOS（${{ matrix.arch }}）
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
@@ -205,6 +262,14 @@ jobs:
       # 这里真跑一次打包后的二进制，断言它进入引导分支。
       - name: 冒烟启动打包应用
         run: |
+          HOST=$(uname -m)
+          TARGET="${{ matrix.arch }}"
+          # arm64 宿主上没有 Rosetta 时本来就跑不起 x64 产物，这属于运行环境缺能力，
+          # 与产物是否可用无关，跳过并说明原因，避免误判成发布包有问题。
+          if [ "$HOST" != "$TARGET" ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "宿主为 $HOST、产物为 $TARGET，且未安装 Rosetta，跳过启动冒烟"
+            exit 0
+          fi
           BIN="${{ steps.locate.outputs.dir }}/InterviewQA.app/Contents/MacOS/InterviewQA"
           rm -f /tmp/app-start.log
           "$BIN" > /tmp/app-start.log 2>&1 &
