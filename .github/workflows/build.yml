@@ -267,7 +267,9 @@ jobs:
           # 托管 runner 只有 arm64 机型，x64 产物要靠 Rosetta 才跑得起来，
           # 而跨架构运行的结果不能代表目标机型，因此只在两者一致时才做启动冒烟。
           if [ "$HOST" != "$TARGET" ]; then
-            echo "宿主为 $HOST、产物为 $TARGET，跨架构运行无法代表目标机型，跳过启动冒烟"
+            # 变量一律加花括号定界：macOS runner 自带 bash 3.2，单词形式后面紧跟多字节
+            # 标点（、，）时会把标点当成变量名的一部分，导致变量值在日志里消失。
+            echo "宿主为 ${HOST}、产物为 ${TARGET}，跨架构运行无法代表目标机型，跳过启动冒烟"
             exit 0
           fi
           BIN="${{ steps.locate.outputs.dir }}/InterviewQA.app/Contents/MacOS/InterviewQA"
