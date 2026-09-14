@@ -37,13 +37,16 @@ jobs:
       - name: 语法检查
         run: |
           for file in main.js config.js preload.js resume.js resume-context.js \
-                      start.js test-resume-context.js scripts/*.js; do
+                      transcript-merge.js start.js test-resume-context.js scripts/*.js; do
             echo "检查 $file"
             node --check "$file"
           done
 
       - name: 简历注入策略自测
         run: node test-resume-context.js
+
+      - name: 转写拼接自测
+        run: npm run test:merge
 
       - name: 安装依赖
         run: npm ci
@@ -137,6 +140,21 @@ jobs:
       - name: 打包 macOS（${{ matrix.arch }}）
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
 
+      # electron-builder 对 x64 用 dist/mac、对其他架构用 dist/mac-<arch>，
+      # 写死目录名会在 x64 上找不到产物，这里按实际输出定位。
+      - name: 定位打包输出
+        id: locate
+        run: |
+          count=$(ls -d dist/mac* 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::期望恰好一个 mac 输出目录，实际 $count 个"
+            ls -d dist/mac* 2>/dev/null || true
+            exit 1
+          fi
+          DIR=$(ls -d dist/mac* | head -1)
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "输出目录：$DIR"
+
       - name: 校验产物与签名
         run: |
           ls -lh dist
@@ -146,7 +164,7 @@ jobs:
               exit 1
             fi
           done
-          APP="dist/mac-${{ matrix.arch }}/InterviewQA.app"
+          APP="${{ steps.locate.outputs.dir }}/InterviewQA.app"
           if [ ! -d "$APP" ]; then
             echo "::error::没有找到 $APP"
             exit 1
@@ -163,7 +181,7 @@ jobs:
       # 比只检查配置里的 files 白名单更可靠——配置对不代表打出来的包就对。
       - name: 断言包内不含个人材料
         run: |
-          APP="dist/mac-${{ matrix.arch }}/InterviewQA.app"
+          APP="${{ steps.locate.outputs.dir }}/InterviewQA.app"
           npx asar list "$APP/Contents/Resources/app.asar" > /tmp/asar-list.txt
           echo "== 顶层内容 =="
           grep -vE "^/node_modules" /tmp/asar-list.txt
@@ -187,7 +205,7 @@ jobs:
       # 这里真跑一次打包后的二进制，断言它进入引导分支。
       - name: 冒烟启动打包应用
         run: |
-          BIN="dist/mac-${{ matrix.arch }}/InterviewQA.app/Contents/MacOS/InterviewQA"
+          BIN="${{ steps.locate.outputs.dir }}/InterviewQA.app/Contents/MacOS/InterviewQA"
           rm -f /tmp/app-start.log
           "$BIN" > /tmp/app-start.log 2>&1 &
           PID=$!

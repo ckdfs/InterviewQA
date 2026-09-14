@@ -240,6 +240,18 @@ async function ensureCapturePermission() {
   }
 }
 
+/**
+ * 音频轨是否真的在推流。
+ * Electron 采集系统声音失败时会给出一条已结束（ended）的静音轨，且不报任何错误，
+ * 所以拿到轨之后必须显式确认它处于 live 状态，否则录制会一直是静音。
+ */
+async function audioTrackLive(track) {
+  if (!track) return false;
+  if (track.readyState === 'live') return true;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  return track.readyState === 'live';
+}
+
 async function startRecording() {
   if (!(await ensureCapturePermission())) return;
 
@@ -285,6 +297,20 @@ async function startRecording() {
 
   stream = media;
   stream.getVideoTracks().forEach((track) => track.stop()); // 只要音频
+
+  if (!(await audioTrackLive(stream.getAudioTracks()[0]))) {
+    stream.getTracks().forEach((track) => track.stop());
+    await window.api.cancelRecording();
+    addRow(
+      'ai',
+      ui.isMac
+        ? '系统音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试；若仍未恢复，到设置里重新检查录音权限。'
+        : '系统音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试。',
+      'is-error'
+    );
+    applyStatus('idle', '系统音频未就绪');
+    return;
+  }
 
   sourceNode = audioCtx.createMediaStreamSource(stream);
   workletNode = new AudioWorkletNode(audioCtx, 'pcm-recorder');

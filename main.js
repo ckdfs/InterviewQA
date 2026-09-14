@@ -17,6 +17,7 @@ const { URL } = require('url');
 const { spawn } = require('child_process');
 const { loadResume, findSources, resumeCacheUsable } = require('./resume');
 const { buildResumeContext } = require('./resume-context');
+const { mergeWithOverlapDedupe } = require('./transcript-merge');
 const { ConfigStore } = require('./config');
 
 const APP_ROOT = __dirname;
@@ -59,6 +60,14 @@ if (IS_WIN) {
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
   app.commandLine.appendSwitch('in-process-gpu');
+}
+
+// macOS 采集电脑播放的声音，走 Screen & System Audio Recording 权限体系。
+// Electron 39 起 Chromium 默认改走 CoreAudio Tap，该路径创建失败时只返回一条
+// 静音且已结束的音频轨，官方文档说明不会有任何告警；实测切回这套权限体系
+// 可以稳定采到系统输出，因此固定使用它。
+if (IS_MAC) {
+  app.commandLine.appendSwitch('disable-features', 'MacCatapLoopbackAudioForScreenShare');
 }
 
 const BASE_SYSTEM_PROMPT = `你是资深面试官兼求职教练。用户会给你一段面试问题（文本来自语音识别，可能有错别字，请先自行理解并纠正）。
@@ -154,45 +163,6 @@ function rmsOfInt16(buf) {
     sum += v * v;
   }
   return Math.sqrt(sum / count);
-}
-
-const PUNCT_RE = /[，。、？！；：""''（）《》\s,.?!;:'"()\-—…·]/;
-
-/** 去掉标点/空白，并记录每个字符在原串中的位置，便于回填 */
-function normalizeWithMap(text) {
-  let norm = '';
-  const map = [];
-  for (let i = 0; i < text.length; i++) {
-    if (!PUNCT_RE.test(text[i])) {
-      norm += text[i];
-      map.push(i);
-    }
-  }
-  return { norm, map };
-}
-
-/**
- * 拼接两段相邻片段的转写结果：找 a 的尾部与 b 的头部重叠部分并去重。
- * 忽略标点差异，且允许重叠出现在 b 的前若干个字里（识别可能吞掉开头一两个字）。
- */
-function mergeWithOverlapDedupe(a, b) {
-  if (!a) return b;
-  if (!b) return a;
-
-  const { norm: na } = normalizeWithMap(a);
-  const { norm: nb, map: mapB } = normalizeWithMap(b);
-  const headLen = Math.min(nb.length, 60);
-  const maxK = Math.min(na.length, 45);
-
-  for (let k = maxK; k >= 4; k--) {
-    const tail = na.slice(-k);
-    const pos = nb.slice(0, headLen).indexOf(tail);
-    if (pos >= 0) {
-      const cutIndex = mapB[pos + k] !== undefined ? mapB[pos + k] : b.length;
-      return b.slice(cutIndex) ? a + b.slice(cutIndex) : a;
-    }
-  }
-  return a + b;
 }
 
 // ---------------------------------------------------------------- 转写 worker 池

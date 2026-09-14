@@ -13,6 +13,7 @@
     "icon": "node scripts/launch.js --script scripts/make-icon.js",
     "selftest": "node start.js --selftest",
     "test:context": "node test-resume-context.js",
+    "test:merge": "node scripts/check-transcript-merge.js",
     "test:resume": "node scripts/check-resume-pipeline.js",
     "test:stt": "node scripts/run-stt-test.js",
     "test:ui": "node scripts/launch.js --script scripts/ui-check.js",

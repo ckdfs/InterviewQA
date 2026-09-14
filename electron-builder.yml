@@ -16,6 +16,7 @@ files:
   - preload.js
   - resume.js
   - resume-context.js
+  - transcript-merge.js
   - package.json
   - config.example.json
   - renderer/**/*
