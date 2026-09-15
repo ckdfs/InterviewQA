@@ -340,6 +340,10 @@ select.input {
   color: var(--danger);
 }
 
+.field-hint.is-warn {
+  color: var(--warn);
+}
+
 .inline-row {
   display: flex;
   align-items: center;
@@ -359,6 +363,107 @@ select.input {
 
 .inline-note.is-error {
   color: var(--danger);
+}
+
+.inline-note.is-warn {
+  color: var(--warn);
+}
+
+/* 分段选择：音源这类二选一的开关，比下拉更直观 */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--panel-2);
+}
+
+.seg {
+  height: 26px;
+  padding: 0 var(--sp-4);
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg:hover {
+  color: var(--text);
+}
+
+.seg.is-active {
+  background: var(--brand);
+  color: #fff;
+}
+
+/* 自检结果：一条链路一行，成功与失败用同一种形态呈现 */
+.probe-list {
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.probe-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  font-size: var(--fs-xs);
+}
+
+.probe-item .probe-name {
+  flex: none;
+  width: 84px;
+  color: var(--text-2);
+}
+
+.probe-item .probe-state {
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.probe-item.is-busy .probe-state {
+  color: var(--text-2);
+}
+
+.probe-item.is-ok {
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+}
+
+.probe-item.is-ok .probe-name,
+.probe-item.is-ok .probe-state {
+  color: var(--ok);
+}
+
+.probe-item.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.probe-item.is-error .probe-name,
+.probe-item.is-error .probe-state {
+  color: var(--danger);
+}
+
+.probe-item.is-warn {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+
+.probe-item.is-warn .probe-name,
+.probe-item.is-warn .probe-state {
+  color: var(--warn);
 }
 
 .switch-row {
@@ -576,6 +681,21 @@ select.input {
   flex-direction: column;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.source-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 32px;
+}
+
+.input-compact {
+  width: auto;
+  max-width: 260px;
+  height: 30px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 .level {

@@ -14,9 +14,10 @@ contextBridge.exposeInMainWorld('api', {
   abortAnswer: () => ipcRenderer.invoke('answer:abort'),
   sendPcm: (arrayBuffer) => ipcRenderer.send('audio:pcm', arrayBuffer),
 
-  // 系统声音采集权限
+  // 音频采集权限（系统声音 / 麦克风）
   getCaptureStatus: () => ipcRenderer.invoke('capture:status'),
-  openPrivacySettings: () => ipcRenderer.invoke('capture:openPrivacy'),
+  requestMicrophone: () => ipcRenderer.invoke('capture:requestMicrophone'),
+  openPrivacySettings: (kind) => ipcRenderer.invoke('capture:openPrivacy', kind),
 
   // 简历
   getResumeStatus: () => ipcRenderer.invoke('resume:get'),
@@ -35,6 +36,7 @@ contextBridge.exposeInMainWorld('api', {
   revealResumeDir: () => ipcRenderer.invoke('settings:revealResumeDir'),
   revealConfig: () => ipcRenderer.invoke('settings:revealConfig'),
   testDeepSeek: () => ipcRenderer.invoke('settings:testDeepSeek'),
+  testMimo: () => ipcRenderer.invoke('settings:testMimo'),
 
   // 自动更新
   getUpdateState: () => ipcRenderer.invoke('update:state'),

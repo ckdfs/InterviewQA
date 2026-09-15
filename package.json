@@ -16,7 +16,7 @@
     "test:merge": "node scripts/check-transcript-merge.js",
     "test:update": "node scripts/check-update.js",
     "test:resume": "node scripts/check-resume-pipeline.js",
-    "test:stt": "node scripts/run-stt-test.js",
+    "test:asr": "node scripts/check-asr.js",
     "test:ui": "node scripts/launch.js --script scripts/ui-check.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win --x64",

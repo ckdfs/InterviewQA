@@ -18,6 +18,8 @@ const el = {
   hintText: $('hintText'),
   levelWrap: $('levelWrap'),
   levelBar: $('levelBar'),
+  sourceSwitch: $('sourceSwitch'),
+  micSelect: $('micSelect'),
   toasts: $('toasts'),
 
   setupOverlay: $('setupOverlay'),
@@ -30,7 +32,8 @@ const el = {
   setupDeepseekBase: $('setupDeepseekBase'),
   setupMimoBase: $('setupMimoBase'),
   setupTestBtn: $('setupTestBtn'),
-  setupTestResult: $('setupTestResult'),
+  setupProbeDeepseek: $('setupProbeDeepseek'),
+  setupProbeMimo: $('setupProbeMimo'),
   setupAdvancedBtn: $('setupAdvancedBtn'),
   setupAdvanced: $('setupAdvanced'),
   setupPickBtn: $('setupPickBtn'),
@@ -43,6 +46,13 @@ const el = {
   setupPrivacyText: $('setupPrivacyText'),
   setupPrivacyBtn: $('setupPrivacyBtn'),
   setupCheckList: $('setupCheckList'),
+  setupSourceSwitch: $('setupSourceSwitch'),
+  setupSourceHint: $('setupSourceHint'),
+  setupMicField: $('setupMicField'),
+  setupMicSelect: $('setupMicSelect'),
+  setupMicHint: $('setupMicHint'),
+  setupProbeBtn: $('setupProbeBtn'),
+  setupProbeResult: $('setupProbeResult'),
 
   drawerMask: $('drawerMask'),
   settingsDrawer: $('settingsDrawer'),
@@ -58,15 +68,22 @@ const el = {
   setMimoKeyState: $('setMimoKeyState'),
   setMimoBase: $('setMimoBase'),
   setMimoModel: $('setMimoModel'),
-  setTestBtn: $('setTestBtn'),
-  setTestResult: $('setTestResult'),
+  setTestDeepseekBtn: $('setTestDeepseekBtn'),
+  setTestMimoBtn: $('setTestMimoBtn'),
+  setProbeDeepseek: $('setProbeDeepseek'),
+  setProbeMimo: $('setProbeMimo'),
   setMaxChars: $('setMaxChars'),
   setHistory: $('setHistory'),
   setReasoning: $('setReasoning'),
   setContextMode: $('setContextMode'),
   setResumeEnabled: $('setResumeEnabled'),
-  setEngine: $('setEngine'),
-  setEngineHint: $('setEngineHint'),
+  setSourceSwitch: $('setSourceSwitch'),
+  setSourceHint: $('setSourceHint'),
+  setMicField: $('setMicField'),
+  setMicSelect: $('setMicSelect'),
+  setMicHint: $('setMicHint'),
+  setProbeRecordBtn: $('setProbeRecordBtn'),
+  setProbeRecordResult: $('setProbeRecordResult'),
   setTargetSeconds: $('setTargetSeconds'),
   setMaxSeconds: $('setMaxSeconds'),
   setSilence: $('setSilence'),
@@ -89,6 +106,20 @@ const ui = {
   settings: null,
   appInfo: null,
   update: null,
+  capture: null,
+};
+
+/**
+ * 音源状态。
+ * 底栏是权威来源：在底栏切换音源或换麦克风会立即生效并落盘，
+ * 引导页与设置页只是同一份状态的另外两个视图。
+ */
+const audioUI = {
+  source: 'system',
+  deviceId: '',
+  deviceLabel: '',
+  devices: [],
+  devicesReady: false,
 };
 
 let stream = null;
@@ -128,7 +159,7 @@ function toast(message, kind = 'info', action) {
 function note(node, message, kind = '') {
   if (!node) return;
   node.textContent = message || '';
-  node.className = `inline-note${kind === 'ok' ? ' is-ok' : kind === 'error' ? ' is-error' : ''}`;
+  node.className = `inline-note${kind ? ` is-${kind}` : ''}`;
 }
 
 // ---------------------------------------------------------------- 对话区
@@ -162,7 +193,17 @@ function addRow(who, text, extraClass) {
 
 // ---------------------------------------------------------------- 控制区状态
 
-const MAC_HINT = 'macOS 需要先授予「屏幕录制」权限，点击录音时会自动引导';
+/** 空闲时的提示语：按当前音源给出对应的操作说明 */
+function idleHint() {
+  if (audioUI.source === 'microphone') return '正在使用麦克风，点击开始录音';
+  if (ui.isMac) return '电脑声音需要先授予「屏幕录制」权限，点击录音时会自动引导';
+  return '正在使用电脑声音，点击开始录音';
+}
+
+/** 录音中状态栏与提示语里的音源名称 */
+function sourceLabel(source = audioUI.source) {
+  return source === 'microphone' ? '麦克风' : '电脑播放的声音';
+}
 
 function renderControls() {
   el.recordBtn.classList.remove('is-recording', 'is-stopping');
@@ -186,11 +227,11 @@ function renderControls() {
   } else if (ui.mode === 'loading') {
     el.recordBtnText.textContent = '准备中…';
     el.recordBtn.disabled = true;
-    el.hintText.textContent = '正在加载语音引擎';
+    el.hintText.textContent = '正在准备';
     el.levelWrap.classList.remove('is-active');
   } else {
     el.recordBtnText.textContent = '开始录音';
-    el.hintText.textContent = ui.isMac ? MAC_HINT : '再次点击结束这一段并生成回答';
+    el.hintText.textContent = idleHint();
     el.levelWrap.classList.remove('is-active');
     el.levelBar.style.width = '0%';
   }
@@ -198,6 +239,9 @@ function renderControls() {
   const busy = ui.mode !== 'idle';
   el.questionInput.disabled = busy;
   el.sendBtn.disabled = busy || !el.questionInput.value.trim();
+  // 录音过程中不允许换音源，否则会录到一半换了设备
+  for (const btn of el.sourceSwitch.querySelectorAll('.seg')) btn.disabled = busy;
+  el.micSelect.disabled = busy;
 }
 
 function applyStatus(state, message) {
@@ -255,6 +299,179 @@ async function checkUpdate() {
   renderUpdate(snapshot);
 }
 
+// ---------------------------------------------------------------- 自检结果
+
+/**
+ * 把一次自检画成一行：名称固定，结论与配色随状态变化。
+ * 引导页与设置页共用同一种形态，两处看到的结论始终一致。
+ */
+function paintProbe(node, state, message) {
+  if (!node) return;
+  const stateEl = node.querySelector('.probe-state');
+  node.classList.toggle('is-busy', state === 'busy');
+  node.classList.toggle('is-ok', state === 'ok');
+  node.classList.toggle('is-warn', state === 'warn');
+  node.classList.toggle('is-error', state === 'error');
+  if (stateEl) stateEl.textContent = message;
+}
+
+function probeNodes(kind) {
+  return kind === 'deepseek' ? [el.setupProbeDeepseek, el.setProbeDeepseek] : [el.setupProbeMimo, el.setProbeMimo];
+}
+
+function paintProbeAll(kind, state, message) {
+  for (const node of probeNodes(kind)) paintProbe(node, state, message);
+}
+
+/** 作答链路自检：只打 DeepSeek 的 /models，不消耗 token */
+async function probeDeepSeek() {
+  paintProbeAll('deepseek', 'busy', '正在测试…');
+  const result = await window.api.testDeepSeek();
+  paintProbeAll('deepseek', result.ok ? 'ok' : 'error', result.message);
+  return result;
+}
+
+/** 转写链路自检：用一段静音音频走一次真实转写，Key、地址、模型、网络一并验到 */
+async function probeMimo() {
+  paintProbeAll('mimo', 'busy', '正在用测试音频走一次转写…');
+  const result = await window.api.testMimo();
+  paintProbeAll('mimo', result.ok ? 'ok' : 'error', result.message);
+  return result;
+}
+
+// ---------------------------------------------------------------- 音源与设备
+
+/**
+ * 界面上的三处音源视图：底栏、引导第 3 步、设置面板。
+ * 底栏是权威入口，切换后立即生效并落盘，另外两处跟着同步。
+ */
+const SOURCE_VIEWS = [
+  { switchEl: el.sourceSwitch, micEl: el.micSelect, micFieldEl: null, hintEl: null, micHintEl: null },
+  {
+    switchEl: el.setupSourceSwitch,
+    micEl: el.setupMicSelect,
+    micFieldEl: el.setupMicField,
+    hintEl: el.setupSourceHint,
+    micHintEl: el.setupMicHint,
+  },
+  {
+    switchEl: el.setSourceSwitch,
+    micEl: el.setMicSelect,
+    micFieldEl: el.setMicField,
+    hintEl: el.setSourceHint,
+    micHintEl: el.setMicHint,
+  },
+];
+
+const SOURCE_NOTE = {
+  system: '采集电脑正在播放的声音，适合面试官外放提问。',
+  microphone: '采集麦克风，适合自己出声提问。',
+};
+
+/** 枚举可用的麦克风；还没授权时系统给不出设备名，这时只留一个默认项 */
+async function loadMicrophones() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return [];
+  let list = [];
+  try {
+    list = await navigator.mediaDevices.enumerateDevices();
+  } catch (err) {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const device of list) {
+    if (device.kind !== 'audioinput' || seen.has(device.deviceId)) continue;
+    seen.add(device.deviceId);
+    out.push({ deviceId: device.deviceId, label: device.label || '' });
+  }
+  return out;
+}
+
+/** 下拉里可选的麦克风 */
+function micChoices() {
+  const named = audioUI.devices.filter((device) => device.label);
+  return named.length ? named : [{ deviceId: '', label: '默认麦克风' }];
+}
+
+/** 恢复已保存的麦克风：deviceId 优先，设备换过时按名称兜底 */
+function resolveSavedMic() {
+  const choices = micChoices();
+  if (audioUI.deviceId) {
+    const byId = choices.find((choice) => choice.deviceId === audioUI.deviceId);
+    if (byId) return byId;
+  }
+  if (audioUI.deviceLabel) {
+    const byLabel = choices.find((choice) => choice.label === audioUI.deviceLabel);
+    if (byLabel) return byLabel;
+  }
+  return null;
+}
+
+function fillMicSelect(select) {
+  if (!select) return;
+  const choices = micChoices();
+  const saved = resolveSavedMic();
+  const selectedId = saved ? saved.deviceId : audioUI.deviceId;
+  const signature = `${choices.map((c) => `${c.deviceId}|${c.label}`).join(';')}#${selectedId}`;
+  if (select.dataset.signature === signature) return;
+  select.dataset.signature = signature;
+
+  select.innerHTML = '';
+  for (const choice of choices) {
+    const option = document.createElement('option');
+    option.value = choice.deviceId;
+    option.textContent = choice.label;
+    select.appendChild(option);
+  }
+  if (choices.some((choice) => choice.deviceId === selectedId)) select.value = selectedId;
+}
+
+function paintSources() {
+  const useMic = audioUI.source === 'microphone';
+  for (const view of SOURCE_VIEWS) {
+    for (const btn of view.switchEl.querySelectorAll('.seg')) {
+      btn.classList.toggle('is-active', btn.dataset.source === audioUI.source);
+    }
+    if (view.micFieldEl) view.micFieldEl.hidden = !useMic;
+    if (view.hintEl) view.hintEl.textContent = SOURCE_NOTE[audioUI.source];
+    if (view.micHintEl) {
+      view.micHintEl.textContent = audioUI.devices.some((device) => device.label)
+        ? '换设备后立刻生效。'
+        : '麦克风名称需要先授予麦克风权限才会显示，点「测试录音」即可授权。';
+    }
+    fillMicSelect(view.micEl);
+  }
+}
+
+/** 重新枚举设备；devicechange 时也要走一遍，插拔耳机不用重启应用 */
+async function refreshDevices() {
+  audioUI.devices = await loadMicrophones();
+  audioUI.devicesReady = true;
+  paintSources();
+}
+
+/** 音源偏好属于使用习惯，切换即落盘，不需要用户再点保存 */
+async function persistAudio(patch) {
+  const result = await window.api.saveSettings(patch);
+  if (result && result.ok) ui.settings = result.view;
+  return result;
+}
+
+async function setSource(source) {
+  if (source === audioUI.source) return;
+  audioUI.source = source;
+  paintSources();
+  renderControls();
+  await persistAudio({ 'audio.source': source });
+}
+
+async function setMic(deviceId, label) {
+  audioUI.deviceId = deviceId || '';
+  audioUI.deviceLabel = label || '';
+  paintSources();
+  await persistAudio({ 'audio.deviceId': audioUI.deviceId, 'audio.deviceLabel': audioUI.deviceLabel });
+}
+
 // ---------------------------------------------------------------- 音频采集
 
 /** 提前创建 AudioContext 与 AudioWorklet，点录音时省掉这段等待 */
@@ -274,20 +491,32 @@ async function prewarmAudio() {
   }
 }
 
-/** macOS 上先查屏幕录制权限，未授权时给出可操作的入口，避免用户对着没反应的按钮点 */
-async function ensureCapturePermission() {
-  if (!ui.isMac) return true;
-  try {
-    const status = await window.api.getCaptureStatus();
-    if (status.granted) return true;
-    toast(status.message, 'error', {
+/**
+ * 音源权限前置检查。
+ * 麦克风由主进程代为申请（macOS 会弹系统授权框），屏幕录制只能由用户手动勾选，
+ * 因此这里在未授权时直接给出可操作的入口，避免用户对着没反应的按钮点。
+ */
+async function ensureSourcePermission(source = audioUI.source) {
+  if (source === 'microphone') {
+    const result = await window.api.requestMicrophone();
+    ui.capture = await window.api.getCaptureStatus();
+    if (result.ok) return true;
+    const access = (ui.capture && ui.capture.microphone) || {};
+    toast(access.message || '麦克风不可用，请检查系统权限', 'error', {
       label: '打开系统设置',
-      onClick: () => window.api.openPrivacySettings(),
+      onClick: () => window.api.openPrivacySettings('microphone'),
     });
     return false;
-  } catch (err) {
-    return true;
   }
+  if (!ui.isMac) return true;
+  const status = await window.api.getCaptureStatus();
+  ui.capture = status;
+  if (status.screen && status.screen.granted) return true;
+  toast((status.screen && status.screen.message) || '需要「屏幕录制」权限才能采集电脑声音', 'error', {
+    label: '打开系统设置',
+    onClick: () => window.api.openPrivacySettings('screen'),
+  });
+  return false;
 }
 
 /**
@@ -302,8 +531,44 @@ async function audioTrackLive(track) {
   return track.readyState === 'live';
 }
 
+/** 按当前音源打开音频流：电脑声音走回环，麦克风走 getUserMedia */
+async function openSourceStream(source = audioUI.source) {
+  if (source !== 'microphone') {
+    const media = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    media.getVideoTracks().forEach((track) => track.stop()); // 只要音频
+    return media;
+  }
+  const base = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (!audioUI.deviceId) return navigator.mediaDevices.getUserMedia({ audio: base });
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: audioUI.deviceId } } });
+  } catch (err) {
+    const name = String((err && err.name) || '');
+    if (name !== 'OverconstrainedError' && name !== 'NotFoundError') throw err;
+    // 设备被拔掉或重装后 deviceId 会变，退回默认设备并清掉失效记录，避免一直失败
+    console.warn(`选定的麦克风不可用（${name}），改用默认设备`);
+    await setMic('', '');
+    return navigator.mediaDevices.getUserMedia({ audio: base });
+  }
+}
+
+/** 采集失败的说明：按音源与错误类型给出各自的下一步 */
+function captureErrorMessage(err) {
+  const text = String((err && err.message) || err);
+  const name = String((err && err.name) || '');
+  if (/NotAllowedError|NotReadableError|denied|not allowed/i.test(`${name} ${text}`)) {
+    if (audioUI.source === 'microphone') {
+      return '系统拒绝了麦克风请求。请到「系统设置 → 隐私与安全性 → 麦克风」中勾选本应用并重新打开。';
+    }
+    return ui.isMac
+      ? '系统拒绝了声音采集请求。请到「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用并重新打开。'
+      : `无法采集系统声音：${text}`;
+  }
+  return audioUI.source === 'microphone' ? `无法打开麦克风：${text}` : `无法采集系统声音：${text}`;
+}
+
 async function startRecording() {
-  if (!(await ensureCapturePermission())) return;
+  if (!(await ensureSourcePermission(audioUI.source))) return;
 
   const result = await window.api.startRecording();
   if (!result.ok) {
@@ -316,17 +581,10 @@ async function startRecording() {
 
   let media;
   try {
-    [media] = await Promise.all([
-      navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }),
-      prewarmAudio(),
-    ]);
+    [media] = await Promise.all([openSourceStream(audioUI.source), prewarmAudio()]);
   } catch (err) {
     await window.api.cancelRecording();
-    const message =
-      ui.isMac && /denied|not allowed/i.test(err.message)
-        ? '系统拒绝了声音采集请求。请到「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用并重新打开。'
-        : `无法采集系统声音：${err.message}`;
-    addRow('ai', message, 'is-error');
+    addRow('ai', captureErrorMessage(err), 'is-error');
     applyStatus('idle', '录音启动失败');
     return;
   }
@@ -336,17 +594,18 @@ async function startRecording() {
     await window.api.cancelRecording();
     addRow(
       'ai',
-      ui.isMac
-        ? '没有拿到系统音频轨。请确认已在「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用，并重新打开应用。'
-        : '没有拿到系统音频轨，无法录制电脑播放的声音。',
+      audioUI.source === 'microphone'
+        ? '没有拿到麦克风音频轨，请确认设备已连接并在系统里允许本应用使用麦克风。'
+        : ui.isMac
+          ? '没有拿到系统音频轨。请确认已在「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用，并重新打开应用。'
+          : '没有拿到系统音频轨，无法录制电脑播放的声音。',
       'is-error'
     );
-    applyStatus('idle', '未获取到系统音频');
+    applyStatus('idle', '未获取到音频');
     return;
   }
 
   stream = media;
-  stream.getVideoTracks().forEach((track) => track.stop()); // 只要音频
 
   if (!(await audioTrackLive(stream.getAudioTracks()[0]))) {
     stream.getTracks().forEach((track) => track.stop());
@@ -354,11 +613,11 @@ async function startRecording() {
     addRow(
       'ai',
       ui.isMac
-        ? '系统音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试；若仍未恢复，到设置里重新检查录音权限。'
-        : '系统音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试。',
+        ? '音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试；若仍未恢复，到设置里重新检查录音权限。'
+        : '音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试。',
       'is-error'
     );
-    applyStatus('idle', '系统音频未就绪');
+    applyStatus('idle', '音频通道未就绪');
     return;
   }
 
@@ -380,7 +639,7 @@ async function startRecording() {
 
   userBubble = addRow('user', '');
   userBubble.innerHTML = '<span class="placeholder">正在识别…</span>';
-  applyStatus('recording', '正在录制电脑播放的声音…');
+  applyStatus('recording', `正在录制${sourceLabel()}…`);
 }
 
 async function stopRecording() {
@@ -412,6 +671,65 @@ async function stopRecording() {
   stream = null;
 
   await window.api.stopRecording();
+}
+
+/**
+ * 试录一小段，确认当前音源真的能出声音。
+ * 结论分三档：打不开设备 / 设备正常但没收到声音 / 收到声音。
+ * 「没声音」不被笼统地报成「正常」，用户才能立刻知道该去查什么。
+ */
+async function probeRecording() {
+  if (ui.mode !== 'idle') return { state: 'error', message: '正在使用中，请先结束当前操作' };
+  if (!(await ensureSourcePermission(audioUI.source))) {
+    return { state: 'error', message: '权限未就绪，按提示授权后重试' };
+  }
+
+  let probeStream = null;
+  let ctx = null;
+  try {
+    probeStream = await openSourceStream(audioUI.source);
+    const track = probeStream.getAudioTracks()[0];
+    if (!track) return { state: 'error', message: '没有拿到音频通道' };
+    if (!(await audioTrackLive(track))) {
+      return { state: 'error', message: '音频通道没有真正启动，继续录下去会一直是静音' };
+    }
+
+    ctx = new AudioContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    ctx.createMediaStreamSource(probeStream).connect(analyser);
+
+    const buffer = new Float32Array(analyser.fftSize);
+    let peak = 0;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      analyser.getFloatTimeDomainData(buffer);
+      for (let i = 0; i < buffer.length; i++) peak = Math.max(peak, Math.abs(buffer[i]));
+    }
+
+    if (peak < 0.002) {
+      return {
+        state: 'warn',
+        message:
+          audioUI.source === 'microphone'
+            ? '麦克风已打开，但这 2 秒没有收到声音，说话后再试一次'
+            : '电脑声音通道已打开，但这 2 秒没有收到声音，先让电脑播一段音频再试',
+      };
+    }
+    return { state: 'ok', message: `录音正常，峰值电平 ${(peak * 100).toFixed(1)}%` };
+  } catch (err) {
+    return { state: 'error', message: captureErrorMessage(err) };
+  } finally {
+    if (probeStream) probeStream.getTracks().forEach((track) => track.stop());
+    if (ctx) {
+      try {
+        await ctx.close();
+      } catch (err) {
+        /* ignore */
+      }
+    }
+  }
 }
 
 function submitQuestion() {
@@ -493,6 +811,12 @@ const setup = {
     const state = await window.api.getSetupState();
     ui.setup = state;
     ui.isMac = state.platform === 'darwin';
+    ui.capture = state.capture;
+    if (state.audio) {
+      audioUI.source = state.audio.source || 'system';
+      audioUI.deviceId = state.audio.deviceId || '';
+      audioUI.deviceLabel = state.audio.deviceLabel || '';
+    }
 
     for (const item of el.setupSteps.querySelectorAll('.step')) {
       const index = Number(item.dataset.step);
@@ -506,14 +830,12 @@ const setup = {
     el.setupDeepseekBase.value = state.deepseekBaseUrl || '';
     el.setupMimoBase.value = state.mimoBaseUrl || '';
 
-    if (state.deepseekKeySet) {
-      el.setupDeepseekKey.placeholder = '已配置，留空表示保持不变';
-      note(el.setupTestResult, '');
-    }
+    if (state.deepseekKeySet) el.setupDeepseekKey.placeholder = '已配置，留空表示保持不变';
     if (state.mimoKeySet) el.setupMimoKey.placeholder = '已配置，留空表示保持不变';
 
     this.renderResumeList(state.resume);
-    this.renderPrivacy(state);
+    this.renderCapture(state);
+    paintSources();
 
     el.setupPrevBtn.disabled = this.step === 1;
     el.setupNextBtn.textContent = this.step === this.total ? '开始使用' : '下一步';
@@ -538,35 +860,33 @@ const setup = {
     }
   },
 
-  renderPrivacy(state) {
-    const checks = [];
-    checks.push({
-      ok: state.deepseekKeySet,
-      text: 'DeepSeek API Key 已填写（生成作答参考必需）',
-    });
-    checks.push({
-      ok: state.mimoKeySet,
-      text: 'MiMo ASR API Key 已填写（录制系统声音必需）',
-    });
-    checks.push({
-      ok: !!(state.resume && state.resume.sources.length),
-      text: '已添加简历材料（可选，添加后回答更贴合你的经历）',
-    });
+  /** 第 3 步：录音环境检查，权限、设备、实际能不能收到声音都在这里体现 */
+  renderCapture(state) {
+    const capture = state.capture || {};
+    const screen = capture.screen || {};
+    const microphone = capture.microphone || {};
 
-    if (ui.isMac) {
-      const granted = !state.privacy;
-      checks.push({ ok: granted, text: '已授予「屏幕录制」权限（采集系统声音必需）' });
-      el.setupPrivacyLead.textContent = granted
-        ? '系统声音采集权限已就绪。'
-        : 'macOS 采集系统声音需要「屏幕录制」权限，请按下面的提示授予。';
-      el.setupPrivacyCallout.hidden = granted;
-      if (!granted) {
-        el.setupPrivacyTitle.textContent = '需要授予「屏幕录制」权限';
-        el.setupPrivacyText.textContent = state.privacy.message;
-      }
-    } else {
-      el.setupPrivacyLead.textContent = 'Windows 通过 WASAPI 回环直接采集系统声音，无需额外授权。';
-      el.setupPrivacyCallout.hidden = true;
+    const checks = [
+      { ok: state.deepseekKeySet, text: 'DeepSeek API Key 已填写（生成作答参考必需）' },
+      { ok: state.mimoKeySet, text: 'MiMo ASR API Key 已填写（语音转文字必需）' },
+      { ok: !!screen.granted, text: '电脑声音采集已就绪（用电脑声音提问时需要）' },
+      { ok: !!microphone.granted, text: '麦克风权限已授予（用麦克风提问时需要）' },
+      {
+        ok: !!(state.resume && state.resume.sources.length),
+        text: '已添加简历材料（可选，添加后回答更贴合你的经历）',
+      },
+    ];
+
+    const blocked = [screen, microphone].find((item) => item && item.usable === false);
+    el.setupPrivacyLead.textContent = blocked
+      ? '还有权限没有授予，按下面的提示处理后再录音。'
+      : '录音环境已就绪，点「测试录音」确认能收到声音即可开始使用。';
+    el.setupPrivacyCallout.hidden = !blocked;
+    if (blocked) {
+      const name = blocked.kind === 'screen' ? '屏幕录制' : '麦克风';
+      el.setupPrivacyTitle.textContent = `需要授予「${name}」权限`;
+      el.setupPrivacyText.textContent = blocked.message;
+      el.setupPrivacyBtn.dataset.kind = blocked.kind;
     }
 
     el.setupCheckList.innerHTML = '';
@@ -601,15 +921,17 @@ const setup = {
       const state = await window.api.getSetupState();
       const hasDeepseek = !!patch['deepseekApiKey'] || state.deepseekKeySet;
       if (!hasDeepseek) {
-        note(el.setupTestResult, '请先填写 DeepSeek API Key', 'error');
+        paintProbeAll('deepseek', 'error', '请先填写 DeepSeek API Key');
         return;
       }
-      const saved = await window.api.saveSetup(patch);
-      if (!saved.ok) {
-        note(el.setupTestResult, saved.message, 'error');
-        return;
+      // 这一步没有新内容要存时直接放行：空白补丁不是错误，不该把用户挡在这一步
+      if (Object.keys(patch).length) {
+        const saved = await window.api.saveSetup(patch);
+        if (!saved.ok) {
+          paintProbeAll('deepseek', 'error', saved.message);
+          return;
+        }
       }
-      note(el.setupTestResult, '');
       el.setupDeepseekKey.value = '';
       el.setupMimoKey.value = '';
       this.step = 2;
@@ -705,7 +1027,7 @@ const settings = {
       : 'sk-…';
     el.setMimoKey.placeholder = view.mimoKeySet
       ? `已配置 ${view.mimoKeyTail}，留空表示保持不变`
-      : '填写后即可录制电脑声音';
+      : '填写后即可把语音转成文字';
     note(el.setDeepseekKeyState, view.deepseekKeySet ? '当前已配置' : '尚未配置，无法生成回答', view.deepseekKeySet ? 'ok' : 'error');
     note(el.setMimoKeyState, view.mimoKeySet ? '当前已配置' : '尚未配置，录音不可用', view.mimoKeySet ? 'ok' : 'error');
 
@@ -720,16 +1042,19 @@ const settings = {
     el.setContextMode.value = view.contextMode;
     el.setResumeEnabled.checked = !!view.resumeEnabled;
 
-    el.setEngine.value = view.sttEngine;
+    // 音源是全局状态：设置面板只反映它，改动由底栏与这里的开关共同驱动
+    if (view.audioSource) audioUI.source = view.audioSource;
+    if (view.audioDeviceId !== undefined) audioUI.deviceId = view.audioDeviceId || '';
+    if (view.audioDeviceLabel !== undefined) audioUI.deviceLabel = view.audioDeviceLabel || '';
+    ui.capture = view.capture || ui.capture;
+
     el.setTargetSeconds.value = view.targetSeconds;
     el.setMaxSeconds.value = view.maxSeconds;
     el.setSilence.value = view.silenceThresholdRms;
-    el.setEngineHint.textContent = view.isPackaged
-      ? '打包版不带 Python 运行时，本地 Whisper 不可用；需要本地识别请从源码运行。'
-      : '本地 Whisper 需先在项目目录创建 .venv 并安装 faster-whisper。';
 
     this.renderResumeList(view.resume, true);
     this.renderAbout(view);
+    paintSources();
   },
 
   renderResumeList(resume, removable) {
@@ -764,7 +1089,8 @@ const settings = {
       ['版本', info.version || '-'],
       ['平台', `${info.platform || '-'} / ${info.arch || '-'}`],
       ['运行方式', info.packaged ? '打包版' : '源码模式'],
-      ['识别引擎', info.engine === 'local' ? '本地 Whisper' : '云端 MiMo ASR'],
+      ['语音识别', 'MiMo ASR（云端）'],
+      ['声音来源', sourceLabel(audioUI.source)],
       ['配置文件', view.configPath],
       ['简历目录', view.resumeDir],
     ];
@@ -786,7 +1112,6 @@ const settings = {
       'answer.reasoningEffort': el.setReasoning.value,
       'resume.contextMode': el.setContextMode.value,
       'resume.enabled': el.setResumeEnabled.checked,
-      'stt.engine': el.setEngine.value,
       'chunk.targetSeconds': el.setTargetSeconds.value,
       'chunk.maxSeconds': el.setMaxSeconds.value,
       'chunk.silenceThresholdRms': el.setSilence.value,
@@ -828,6 +1153,18 @@ el.settingsBtn.addEventListener('click', () => openSettings());
 el.settingsCloseBtn.addEventListener('click', () => settings.close());
 el.drawerMask.addEventListener('click', () => settings.close());
 
+// 三处音源视图用同一套交互：切音源、换麦克风都是立即生效并落盘
+for (const view of SOURCE_VIEWS) {
+  view.switchEl.addEventListener('click', (event) => {
+    const btn = event.target.closest('.seg');
+    if (btn && !btn.disabled) setSource(btn.dataset.source);
+  });
+  view.micEl.addEventListener('change', () => {
+    const option = view.micEl.selectedOptions[0];
+    setMic(view.micEl.value, option ? option.textContent : '');
+  });
+}
+
 el.settingsTabs.addEventListener('click', (event) => {
   const btn = event.target.closest('.tab');
   if (btn) settings.switchTab(btn.dataset.tab);
@@ -835,20 +1172,49 @@ el.settingsTabs.addEventListener('click', (event) => {
 
 el.settingsSaveBtn.addEventListener('click', () => settings.save());
 
-el.setTestBtn.addEventListener('click', async () => {
-  note(el.setTestResult, '正在测试…');
-  const typed = el.setDeepseekKey.value.trim();
-  if (typed) {
-    const saved = await window.api.saveSettings({ deepseekApiKey: typed });
-    if (!saved.ok) {
-      note(el.setTestResult, saved.message, 'error');
-      return;
-    }
-    el.setDeepseekKey.value = '';
-    settings.fill(saved.view);
+/**
+ * 先在输入框里改了 Key 的话，测之前先存下来，避免「测的是新 Key、存的是旧 Key」。
+ * 两款服务各有一条独立入口，只想验一条时不必连带另一条。
+ */
+async function saveTypedKeys() {
+  const patch = {};
+  const deepseekKey = el.setDeepseekKey.value.trim();
+  const mimoKey = el.setMimoKey.value.trim();
+  if (deepseekKey) patch['deepseekApiKey'] = deepseekKey;
+  if (mimoKey) patch['stt.mimo.apiKey'] = mimoKey;
+  if (!Object.keys(patch).length) return null;
+  const saved = await window.api.saveSettings(patch);
+  if (!saved.ok) return saved;
+  el.setDeepseekKey.value = '';
+  el.setMimoKey.value = '';
+  settings.fill(saved.view);
+  return saved;
+}
+
+el.setTestDeepseekBtn.addEventListener('click', async () => {
+  paintProbeAll('deepseek', 'busy', '正在测试…');
+  const saved = await saveTypedKeys();
+  if (saved && !saved.ok) {
+    paintProbeAll('deepseek', 'error', saved.message);
+    return;
   }
-  const result = await window.api.testDeepSeek();
-  note(el.setTestResult, result.message, result.ok ? 'ok' : 'error');
+  await probeDeepSeek();
+});
+
+el.setTestMimoBtn.addEventListener('click', async () => {
+  paintProbeAll('mimo', 'busy', '正在保存并测试…');
+  const saved = await saveTypedKeys();
+  if (saved && !saved.ok) {
+    paintProbeAll('mimo', 'error', saved.message);
+    return;
+  }
+  await probeMimo();
+});
+
+el.setProbeRecordBtn.addEventListener('click', async () => {
+  note(el.setProbeRecordResult, '正在试录 2 秒…');
+  const result = await probeRecording();
+  note(el.setProbeRecordResult, result.message, result.state === 'ok' ? 'ok' : result.state === 'warn' ? 'warn' : 'error');
 });
 
 el.updateCheckBtn.addEventListener('click', checkUpdate);
@@ -902,7 +1268,7 @@ el.setupPickBtn.addEventListener('click', async () => {
   const result = await window.api.pickResumeFiles();
   if (!result.ok) return;
   setup.renderResumeList(result.resume);
-  setup.renderPrivacy(await window.api.getSetupState());
+  setup.renderCapture(await window.api.getSetupState());
   toast(`已添加：${result.added.join('、')}`, 'ok');
 });
 el.setupSkipResumeBtn.addEventListener('click', () => {
@@ -912,27 +1278,29 @@ el.setupSkipResumeBtn.addEventListener('click', () => {
 el.setupAdvancedBtn.addEventListener('click', () => {
   el.setupAdvanced.hidden = !el.setupAdvanced.hidden;
 });
-el.setupPrivacyBtn.addEventListener('click', () => window.api.openPrivacySettings());
+el.setupPrivacyBtn.addEventListener('click', () => window.api.openPrivacySettings(el.setupPrivacyBtn.dataset.kind));
+el.setupProbeBtn.addEventListener('click', async () => {
+  note(el.setupProbeResult, '正在试录 2 秒…');
+  const result = await probeRecording();
+  note(el.setupProbeResult, result.message, result.state === 'ok' ? 'ok' : result.state === 'warn' ? 'warn' : 'error');
+  // 试录会顺带申请权限，回来把清单刷新一遍，用户能立刻看到权限已就绪
+  setup.renderCapture(await window.api.getSetupState());
+  await refreshDevices();
+});
 el.setupTestBtn.addEventListener('click', async () => {
   const patch = setup.collect();
-  if (!patch['deepseekApiKey']) {
-    const state = await window.api.getSetupState();
-    if (!state.deepseekKeySet) {
-      note(el.setupTestResult, '请先填写 DeepSeek API Key', 'error');
-      return;
-    }
-    note(el.setupTestResult, '正在测试已保存的 Key…');
-  } else {
-    note(el.setupTestResult, '正在测试…');
+  const typed = !!patch['deepseekApiKey'] || !!patch['stt.mimo.apiKey'];
+  if (typed) {
     const saved = await window.api.saveSetup(patch);
     if (!saved.ok) {
-      note(el.setupTestResult, saved.message, 'error');
+      paintProbeAll('deepseek', 'error', saved.message);
       return;
     }
     el.setupDeepseekKey.value = '';
+    el.setupMimoKey.value = '';
   }
-  const result = await window.api.testDeepSeek();
-  note(el.setupTestResult, result.message, result.ok ? 'ok' : 'error');
+  // 两条链路一起验：只测作答、不测转写时，录音出问题要等到面试现场才发现
+  await Promise.all([probeDeepSeek(), probeMimo()]);
 });
 
 el.recordBtn.addEventListener('click', () => {
@@ -1021,7 +1389,17 @@ async function refreshAll() {
   ui.appInfo = info;
   ui.setup = state;
   ui.isMac = state.platform === 'darwin';
+  ui.capture = state.capture;
   renderControls();
+  paintSources();
+}
+
+/** 把主进程给出的音源偏好装进界面状态 */
+function adoptAudioState(state) {
+  if (!state || !state.audio) return;
+  audioUI.source = state.audio.source || 'system';
+  audioUI.deviceId = state.audio.deviceId || '';
+  audioUI.deviceLabel = state.audio.deviceLabel || '';
 }
 
 async function boot() {
@@ -1036,21 +1414,34 @@ async function boot() {
   ui.appInfo = info;
   ui.setup = state;
   ui.isMac = state.platform === 'darwin';
+  ui.capture = state.capture;
+  adoptAudioState(state);
 
   applyStatus(status.state, status.message);
   renderResumeBadge(resumeStatus);
   renderUpdate(updateState);
+  paintSources();
 
   if (state.needsSetup) {
     setup.show();
-  } else if (ui.isMac && state.privacy) {
-    toast('系统声音采集需要「屏幕录制」权限', 'error', {
-      label: '打开系统设置',
-      onClick: () => window.api.openPrivacySettings(),
-    });
+  } else {
+    const blocked = [state.capture && state.capture.screen, state.capture && state.capture.microphone].find(
+      (item) => item && item.usable === false
+    );
+    if (blocked) {
+      toast(blocked.message, 'error', {
+        label: '打开系统设置',
+        onClick: () => window.api.openPrivacySettings(blocked.kind),
+      });
+    }
   }
 
   prewarmAudio();
+  // 先枚举一次设备，这样切到麦克风时下拉里已经有内容
+  refreshDevices();
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
+  }
 }
 
 boot();

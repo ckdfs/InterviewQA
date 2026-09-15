@@ -44,9 +44,10 @@
             <path d="M11 21h2.5v3a10.5 10.5 0 0 0 21 0v-3H37v3a13 13 0 0 1-11.5 12.9V41h-3v-4.1A13 13 0 0 1 11 24v-3Z" />
           </svg>
         </div>
-        <p class="empty-title">开始录制电脑正在播放的面试问题</p>
+        <p class="empty-title">开始录制面试问题</p>
         <p class="empty-sub">
-          音频会边录边转成文字，点「结束这一段」后由 DeepSeek 结合你的简历流式给出作答参考；也可以直接在下方输入问题。
+          可以用电脑声音（面试官外放）或麦克风提问：音频边录边转成文字，点「结束这一段」后由 DeepSeek
+          结合你的简历流式给出作答参考；也可以直接在下方输入问题。
         </p>
       </div>
     </main>
@@ -65,6 +66,13 @@
       </div>
 
       <div class="recorder">
+        <div class="source-row">
+          <div class="segmented" id="sourceSwitch" role="group" aria-label="声音来源">
+            <button class="seg" type="button" data-source="system">电脑声音</button>
+            <button class="seg" type="button" data-source="microphone">麦克风</button>
+          </div>
+          <select id="micSelect" class="input input-compact" hidden aria-label="麦克风设备"></select>
+        </div>
         <div class="level" id="levelWrap" aria-hidden="true"><div class="level-bar" id="levelBar"></div></div>
         <button id="recordBtn" class="record-btn" type="button" disabled>
           <span class="record-dot" aria-hidden="true"></span>
@@ -85,7 +93,7 @@
         <ol class="steps" id="setupSteps">
           <li class="step is-active" data-step="1"><span>1</span>模型服务</li>
           <li class="step" data-step="2"><span>2</span>个人简历</li>
-          <li class="step" data-step="3"><span>3</span>录音权限</li>
+          <li class="step" data-step="3"><span>3</span>录音与识别</li>
         </ol>
 
         <div class="modal-body">
@@ -114,10 +122,19 @@
             </div>
 
             <div class="inline-row">
-              <button id="setupTestBtn" class="btn btn-ghost" type="button">测试连接</button>
+              <button id="setupTestBtn" class="btn btn-ghost" type="button">测试连接与转写</button>
               <button id="setupAdvancedBtn" class="btn-link" type="button">高级选项</button>
-              <span id="setupTestResult" class="inline-note"></span>
             </div>
+            <ul class="probe-list" id="setupProbeList">
+              <li class="probe-item" id="setupProbeDeepseek">
+                <span class="probe-name">DeepSeek 作答</span>
+                <span class="probe-state">未测试</span>
+              </li>
+              <li class="probe-item" id="setupProbeMimo">
+                <span class="probe-name">MiMo 转写</span>
+                <span class="probe-state">未测试</span>
+              </li>
+            </ul>
 
             <div class="advanced" id="setupAdvanced" hidden>
               <div class="field">
@@ -151,10 +168,31 @@
 
           <!-- 步骤 3 -->
           <section class="pane" data-pane="3">
-            <p class="pane-lead" id="setupPrivacyLead">正在检查系统声音采集权限…</p>
+            <p class="pane-lead" id="setupPrivacyLead">正在检查录音环境…</p>
+
+            <div class="field">
+              <label>声音来源</label>
+              <div class="segmented" id="setupSourceSwitch" role="group" aria-label="声音来源">
+                <button class="seg" type="button" data-source="system">电脑声音</button>
+                <button class="seg" type="button" data-source="microphone">麦克风</button>
+              </div>
+              <p class="field-hint" id="setupSourceHint"></p>
+            </div>
+
+            <div class="field" id="setupMicField" hidden>
+              <label for="setupMicSelect">麦克风设备</label>
+              <select id="setupMicSelect" class="input"></select>
+              <p class="field-hint" id="setupMicHint"></p>
+            </div>
+
+            <div class="inline-row">
+              <button id="setupProbeBtn" class="btn btn-ghost" type="button">测试录音</button>
+              <span id="setupProbeResult" class="inline-note"></span>
+            </div>
+
             <div class="callout" id="setupPrivacyCallout" hidden>
               <div class="callout-body">
-                <strong id="setupPrivacyTitle">需要授予屏幕录制权限</strong>
+                <strong id="setupPrivacyTitle">需要授予权限</strong>
                 <p id="setupPrivacyText"></p>
               </div>
               <button id="setupPrivacyBtn" class="btn btn-secondary" type="button">打开系统设置</button>
@@ -221,9 +259,19 @@
             <input id="setMimoModel" class="input" type="text" spellcheck="false" />
           </div>
           <div class="inline-row">
-            <button id="setTestBtn" class="btn btn-ghost" type="button">测试 DeepSeek 连接</button>
-            <span id="setTestResult" class="inline-note"></span>
+            <button id="setTestDeepseekBtn" class="btn btn-ghost" type="button">测试 DeepSeek</button>
+            <button id="setTestMimoBtn" class="btn btn-ghost" type="button">测试 MiMo 转写</button>
           </div>
+          <ul class="probe-list" id="setProbeList">
+            <li class="probe-item" id="setProbeDeepseek">
+              <span class="probe-name">DeepSeek 作答</span>
+              <span class="probe-state">未测试</span>
+            </li>
+            <li class="probe-item" id="setProbeMimo">
+              <span class="probe-name">MiMo 转写</span>
+              <span class="probe-state">未测试</span>
+            </li>
+          </ul>
         </section>
 
         <section class="tabpane" data-tabpane="answer">
@@ -264,13 +312,25 @@
           <hr class="sep" />
 
           <div class="field">
-            <label for="setEngine">语音识别引擎</label>
-            <select id="setEngine" class="input">
-              <option value="mimo">云端 MiMo ASR（推荐，随开随用）</option>
-              <option value="local">本地 Whisper（需自建 Python 环境）</option>
-            </select>
-            <p class="field-hint" id="setEngineHint"></p>
+            <label>声音来源</label>
+            <div class="segmented" id="setSourceSwitch" role="group" aria-label="声音来源">
+              <button class="seg" type="button" data-source="system">电脑声音</button>
+              <button class="seg" type="button" data-source="microphone">麦克风</button>
+            </div>
+            <p class="field-hint" id="setSourceHint"></p>
           </div>
+          <div class="field" id="setMicField" hidden>
+            <label for="setMicSelect">麦克风设备</label>
+            <select id="setMicSelect" class="input"></select>
+            <p class="field-hint" id="setMicHint"></p>
+          </div>
+          <div class="inline-row">
+            <button id="setProbeRecordBtn" class="btn btn-ghost" type="button">测试录音</button>
+            <span id="setProbeRecordResult" class="inline-note"></span>
+          </div>
+
+          <hr class="sep" />
+
           <div class="field">
             <label for="setTargetSeconds">切片时长（秒）</label>
             <input id="setTargetSeconds" class="input" type="number" min="3" max="20" step="1" />

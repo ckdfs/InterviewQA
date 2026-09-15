@@ -20,6 +20,7 @@ publish:
 # macOS: ~/Library/Application Support/InterviewQA）。
 files:
   - main.js
+  - asr.js
   - config.js
   - preload.js
   - resume.js
@@ -29,7 +30,6 @@ files:
   - package.json
   - config.example.json
   - renderer/**/*
-  - stt/**/*.py
   - "!**/*.map"
   - "!**/*.d.ts"
   - "!**/*.md"

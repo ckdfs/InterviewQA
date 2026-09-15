@@ -29,7 +29,9 @@ const SETUP_STATE = {
   deepseekKeySet: false,
   mimoKeySet: false,
   platform: process.platform,
-  appVersion: '1.1.0-smoke',
+  appVersion: '1.2.0-smoke',
+  deepseekBaseUrl: 'https://api.deepseek.com',
+  mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
   resume: {
     sources: SAMPLE_RESUME,
     dir: '/tmp/interviewqa-smoke/resume',
@@ -37,10 +39,30 @@ const SETUP_STATE = {
     hasProfile: true,
     supported: ['pdf', 'txt', 'md', 'markdown'],
   },
-  privacy:
-    process.platform === 'darwin'
-      ? { denied: true, status: 'denied', message: '冒烟测试：模拟未授予屏幕录制权限' }
-      : null,
+  audio: { source: 'system', deviceId: '', deviceLabel: '' },
+  capture: {
+    platform: process.platform,
+    source: 'system',
+    screen:
+      process.platform === 'darwin'
+        ? {
+            kind: 'screen',
+            label: '电脑声音',
+            granted: false,
+            usable: false,
+            status: 'denied',
+            message: '冒烟测试：模拟未授予屏幕录制权限',
+          }
+        : { kind: 'screen', label: '电脑声音', granted: true, usable: true, status: 'granted', message: null },
+    microphone: {
+      kind: 'microphone',
+      label: '麦克风',
+      granted: true,
+      usable: true,
+      status: 'granted',
+      message: null,
+    },
+  },
 };
 
 const SETTINGS_VIEW = {
@@ -48,13 +70,14 @@ const SETTINGS_VIEW = {
   deepseekModel: 'deepseek-flash',
   deepseekKeySet: true,
   deepseekKeyTail: '••••abcd',
-  mimoKeySet: false,
-  mimoKeyTail: '',
+  mimoKeySet: true,
+  mimoKeyTail: '••••wxyz',
   mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
   mimoModel: 'mimo-v2.5-asr',
   mimoLanguage: 'zh',
-  sttEngine: 'mimo',
-  fallbackToLocal: false,
+  audioSource: 'system',
+  audioDeviceId: '',
+  audioDeviceLabel: '',
   resumeEnabled: true,
   contextMode: 'smart',
   maxChars: 200,
@@ -68,7 +91,7 @@ const SETTINGS_VIEW = {
   isPackaged: false,
   platform: process.platform,
   resume: SETUP_STATE.resume,
-  privacy: SETUP_STATE.privacy,
+  capture: SETUP_STATE.capture,
 };
 
 /** 界面提交过的保存请求，用于校验字段是否落在后端白名单内 */
@@ -97,21 +120,43 @@ function validatePatch(patch) {
     if (!EDITABLE[key]) problems.push(`保存字段 ${key} 不在后端白名单 EDITABLE 中，实际保存会被拒绝`);
   }
   savedPatches.push(patch);
+  applyPatch(patch);
+}
+
+/**
+ * 桩状态要跟着保存请求变化，否则「保存后再回到上一步，Key 会被当成没配置」
+ * 这类流程在真实环境正常、在冒烟里假失败。
+ */
+function applyPatch(patch) {
+  if (patch.deepseekApiKey) SETUP_STATE.deepseekKeySet = true;
+  if (patch['stt.mimo.apiKey']) SETUP_STATE.mimoKeySet = true;
+  if (patch['audio.source']) {
+    SETUP_STATE.audio.source = patch['audio.source'];
+    SETTINGS_VIEW.audioSource = patch['audio.source'];
+    SETUP_STATE.capture.source = patch['audio.source'];
+  }
+  if (patch['audio.deviceId'] !== undefined) {
+    SETUP_STATE.audio.deviceId = patch['audio.deviceId'];
+    SETTINGS_VIEW.audioDeviceId = patch['audio.deviceId'];
+  }
+  if (patch['audio.deviceLabel'] !== undefined) {
+    SETUP_STATE.audio.deviceLabel = patch['audio.deviceLabel'];
+    SETTINGS_VIEW.audioDeviceLabel = patch['audio.deviceLabel'];
+  }
 }
 
 function registerStubs() {
   const handlers = {
     'status:get': () => ({ state: 'idle', message: '就绪，点击录音开始或直接在下方输入问题' }),
     'app:info': () => ({
-      version: '1.1.0-smoke',
+      version: '1.2.0-smoke',
       platform: process.platform,
       arch: process.arch,
       packaged: false,
       configPath: '/tmp/interviewqa-smoke/config.json',
       resumeDir: '/tmp/interviewqa-smoke/resume',
       userDir: '/tmp/interviewqa-smoke',
-      engine: 'mimo',
-      localEngineAvailable: false,
+      audioSource: 'system',
       updateMode: 'notify',
       portable: false,
       signingKind: process.platform === 'darwin' ? 'adhoc' : 'n/a',
@@ -133,7 +178,15 @@ function registerStubs() {
     'settings:resumeRemove': () => ({ ok: true, resume: { ...SETUP_STATE.resume, sources: [] } }),
     'settings:revealResumeDir': () => ({ ok: true }),
     'settings:revealConfig': () => ({ ok: true }),
-    'settings:testDeepSeek': () => ({ ok: true, message: 'DeepSeek 连接正常' }),
+    'settings:testDeepSeek': () => ({ ok: true, message: 'DeepSeek 连接正常，Key 有效' }),
+    'settings:testMimo': () => ({
+      ok: true,
+      reason: 'ok',
+      message: 'MiMo 连接与转写可用（https://api.xiaomimimo.com/v1 / mimo-v2.5-asr），识别返回 0 字',
+    }),
+    'capture:status': () => SETUP_STATE.capture,
+    'capture:requestMicrophone': () => ({ ok: true, access: SETUP_STATE.capture.microphone }),
+    'capture:openPrivacy': (_event) => ({ ok: true }),
     'update:state': () => updateState,
     'update:check': () => {
       updateState = {
@@ -150,8 +203,6 @@ function registerStubs() {
       openedUpdatePage += 1;
       return { ok: true };
     },
-    'capture:status': () => SETUP_STATE.privacy || { granted: true },
-    'capture:openPrivacy': () => ({ ok: true }),
     'recording:start': () => ({ ok: true }),
     'recording:stop': () => ({ ok: true }),
     'recording:cancel': () => ({ ok: true }),
@@ -227,6 +278,8 @@ app.whenReady().then(async () => {
       activePane: document.querySelector('#setupOverlay .pane.is-active')?.dataset.pane,
       resumeItems: document.querySelectorAll('#setupResumeList .resume-item').length,
       checkItems: document.querySelectorAll('#setupCheckList li').length,
+      probeItems: document.querySelectorAll('#setupProbeList .probe-item').length,
+      probeStates: [...document.querySelectorAll('#setupProbeList .probe-state')].map((n) => n.textContent),
       recordText: document.getElementById('recordBtnText').textContent,
       statusText: document.getElementById('statusText').textContent,
       badge: document.getElementById('resumeBadge').textContent,
@@ -239,24 +292,98 @@ app.whenReady().then(async () => {
   if (boot.stepCount !== 3) problems.push(`引导步骤数应为 3，实际 ${boot.stepCount}`);
   if (boot.activePane !== '1') problems.push(`引导初始应停在第 1 步，实际第 ${boot.activePane} 步`);
   if (boot.resumeItems !== SAMPLE_RESUME.length) problems.push('引导里的简历清单没有渲染出来');
-  const expectedChecks = process.platform === 'darwin' ? 4 : 3;
-  if (boot.checkItems !== expectedChecks) {
-    problems.push(`第 3 步的检查项数量异常：${boot.checkItems}（应为 ${expectedChecks}）`);
+  // 五项检查：两个 Key、电脑声音、麦克风、简历
+  if (boot.checkItems !== 5) problems.push(`第 3 步的检查项数量异常：${boot.checkItems}（应为 5）`);
+  if (boot.probeItems !== 2) problems.push(`连接自检应有两条链路，实际 ${boot.probeItems} 条`);
+  if (boot.probeStates.some((text) => text !== '未测试')) {
+    problems.push(`自检初始状态应都是「未测试」：${boot.probeStates.join(' / ')}`);
   }
   if (boot.recordText !== '开始录音') problems.push(`录音按钮文案异常：${boot.recordText}`);
   if (boot.inputDisabled) problems.push('空闲状态下输入框不应被禁用');
 
-  // 3) 引导下一步（第 1 步 → 第 2 步）
-  await run(`document.getElementById('setupDeepseekKey').value = 'sk-smoke-test-key'; document.getElementById('setupNextBtn').click(); return 1;`);
+  // 3) 第 1 步的「测试连接与转写」：两条链路都要出结论
+  await run(`
+    document.getElementById('setupDeepseekKey').value = 'sk-smoke-test-key';
+    document.getElementById('setupTestBtn').click();
+    return 1;
+  `);
+  await wait(900);
+  const probed = await run(`
+    return [...document.querySelectorAll('#setupProbeList .probe-item')].map((n) => ({
+      ok: n.classList.contains('is-ok'),
+      text: n.querySelector('.probe-state').textContent,
+    }));
+  `);
+  if (!probed[0].ok || !probed[0].text.includes('DeepSeek')) {
+    problems.push(`作答链路自检没有落到成功：${probed[0].text}`);
+  }
+  if (!probed[1].ok || !probed[1].text.includes('转写可用')) {
+    problems.push(`转写链路自检没有落到成功：${probed[1].text}`);
+  }
+
+  // 4) 引导下一步（第 1 步 → 第 2 步）
+  await run(`document.getElementById('setupNextBtn').click(); return 1;`);
   await wait(700);
   const step2 = await run(`
     return document.querySelector('#setupOverlay .pane.is-active')?.dataset.pane;
   `);
   if (step2 !== '2') problems.push(`点下一步后应进入第 2 步，实际第 ${step2} 步`);
 
-  // 4) 跳到第 3 步并走完引导
+  // 5) 第 3 步：音源切换、麦克风选择、试录失败时的说明
   await run(`document.getElementById('setupNextBtn').click(); return 1;`);
-  await wait(600);
+  await wait(700);
+  const step3 = await run(`
+    return {
+      pane: document.querySelector('#setupOverlay .pane.is-active')?.dataset.pane,
+      activeSource: document.querySelector('#setupSourceSwitch .seg.is-active')?.dataset.source,
+      micHidden: document.getElementById('setupMicField').hidden,
+      micOptions: document.querySelectorAll('#setupMicSelect option').length,
+    };
+  `);
+  if (step3.pane !== '3') problems.push(`应进入第 3 步，实际第 ${step3.pane} 步`);
+  if (step3.activeSource !== 'system') problems.push(`默认音源应为电脑声音，实际 ${step3.activeSource}`);
+  if (!step3.micHidden) problems.push('默认音源下不该显示麦克风选择');
+  if (step3.micOptions < 1) problems.push('麦克风下拉至少要有一个默认项');
+
+  await run(`
+    document.querySelector('#setupSourceSwitch .seg[data-source="microphone"]').click();
+    return 1;
+  `);
+  await wait(500);
+  const switched = await run(`
+    return {
+      micHidden: document.getElementById('setupMicField').hidden,
+      activeSource: document.querySelector('#setupSourceSwitch .seg.is-active')?.dataset.source,
+      bottomSource: document.querySelector('#sourceSwitch .seg.is-active')?.dataset.source,
+      settingsSource: document.querySelector('#setSourceSwitch .seg.is-active')?.dataset.source,
+      hint: document.getElementById('setupSourceHint').textContent,
+    };
+  `);
+  if (switched.micHidden) problems.push('切到麦克风后应显示麦克风选择');
+  if (switched.activeSource !== 'microphone') problems.push('音源没有切到麦克风');
+  if (switched.bottomSource !== 'microphone' || switched.settingsSource !== 'microphone') {
+    problems.push(`三处音源视图没有同步：底栏 ${switched.bottomSource}，设置 ${switched.settingsSource}`);
+  }
+  if (!switched.hint.includes('麦克风')) problems.push(`音源说明没有跟着换：${switched.hint}`);
+
+  // 麦克风被系统拒绝时，给出的必须是可操作的说明，而不是笼统的失败
+  await run(`
+    navigator.mediaDevices.getUserMedia = () =>
+      Promise.reject(Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' }));
+    document.getElementById('setupProbeBtn').click();
+    return 1;
+  `);
+  await wait(900);
+  const probeFailed = await run(`return document.getElementById('setupProbeResult').textContent;`);
+  if (!probeFailed.includes('麦克风')) problems.push(`试录失败没有说明原因：${probeFailed}`);
+  if (!probeFailed.includes('系统设置')) problems.push(`试录失败没有给出下一步：${probeFailed}`);
+
+  // 切回电脑声音再走完引导
+  await run(`
+    document.querySelector('#setupSourceSwitch .seg[data-source="system"]').click();
+    return 1;
+  `);
+  await wait(400);
   await run(`document.getElementById('setupNextBtn').click(); return 1;`);
   await wait(700);
   const afterFinish = await run(`
@@ -282,8 +409,38 @@ app.whenReady().then(async () => {
   `);
   if (!drawer.open || !drawer.mask) problems.push('设置抽屉没有正常打开');
   if (drawer.resumeItems !== SAMPLE_RESUME.length) problems.push('设置里的简历清单没有渲染出来');
-  if (drawer.aboutRows !== 6) problems.push(`关于页签字段数异常：${drawer.aboutRows}`);
+  if (drawer.aboutRows !== 7) problems.push(`关于页签字段数异常：${drawer.aboutRows}`);
   if (!drawer.keyState.includes('已配置')) problems.push('已配置的 Key 状态没有回显');
+
+  // 模型服务页签：两条链路各自可以单独测
+  const deepseekBefore = await run(`return document.querySelector('#setProbeDeepseek .probe-state').textContent;`);
+  await run(`document.getElementById('setTestMimoBtn').click(); return 1;`);
+  await wait(700);
+  const mimoProbe = await run(`
+    return {
+      ok: document.getElementById('setProbeMimo').classList.contains('is-ok'),
+      text: document.querySelector('#setProbeMimo .probe-state').textContent,
+      deepseekText: document.querySelector('#setProbeDeepseek .probe-state').textContent,
+    };
+  `);
+  if (!mimoProbe.ok || !mimoProbe.text.includes('转写可用')) {
+    problems.push(`MiMo 自检没有落到成功：${mimoProbe.text}`);
+  }
+  if (mimoProbe.deepseekText !== deepseekBefore) {
+    problems.push('只测转写时不该改动作答链路的结论');
+  }
+
+  await run(`document.getElementById('setTestDeepseekBtn').click(); return 1;`);
+  await wait(700);
+  const deepseekProbe = await run(`
+    return {
+      ok: document.getElementById('setProbeDeepseek').classList.contains('is-ok'),
+      text: document.querySelector('#setProbeDeepseek .probe-state').textContent,
+    };
+  `);
+  if (!deepseekProbe.ok || !deepseekProbe.text.includes('DeepSeek')) {
+    problems.push(`DeepSeek 自检没有落到成功：${deepseekProbe.text}`);
+  }
 
   await run(`document.querySelector('#settingsTabs .tab[data-tab="answer"]').click(); return 1;`);
   await wait(300);
@@ -291,6 +448,16 @@ app.whenReady().then(async () => {
   await wait(700);
   const saved = await run(`return document.getElementById('settingsNote').textContent;`);
   if (saved !== '已保存') problems.push(`保存设置后的提示异常：${saved}`);
+
+  // 设置里的音源控件要反映底栏的状态，切过来就能直接改
+  const settingsSource = await run(`
+    return {
+      active: document.querySelector('#setSourceSwitch .seg.is-active')?.dataset.source,
+      micHidden: document.getElementById('setMicField').hidden,
+    };
+  `);
+  if (settingsSource.active !== 'system') problems.push(`设置里的音源没有同步：${settingsSource.active}`);
+  if (!settingsSource.micHidden) problems.push('电脑声音下设置里不该显示麦克风选择');
 
   // 6) 关于页签里的自动更新入口
   await run(`document.querySelector('#settingsTabs .tab[data-tab="about"]').click(); return 1;`);
@@ -331,7 +498,7 @@ app.whenReady().then(async () => {
 
   // 界面保存过的字段必须都能被后端接受
   const coveredFields = new Set(savedPatches.flatMap((patch) => Object.keys(patch)));
-  for (const field of ['answer.reasoningEffort', 'answer.maxChars', 'resume.contextMode']) {
+  for (const field of ['answer.reasoningEffort', 'answer.maxChars', 'resume.contextMode', 'audio.source']) {
     if (!coveredFields.has(field)) problems.push(`设置面板没有提交 ${field}`);
   }
 
@@ -343,7 +510,7 @@ app.whenReady().then(async () => {
     return;
   }
 
-  console.log('界面冒烟测试通过：元素引用完整、引导向导、设置面板与更新入口交互正常');
+  console.log('界面冒烟测试通过：元素引用完整、引导向导、音源切换、连接自检、设置面板与更新入口交互正常');
   console.log(`  检查元素 ${referencedIds().length} 个，引导 3 步，设置 4 个页签`);
   console.log(`  保存字段 ${coveredFields.size} 个，全部命中后端白名单`);
   app.exit(0);

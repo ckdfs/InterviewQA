@@ -14,11 +14,19 @@ const fs = require('fs');
 const os = require('os');
 const https = require('https');
 const { URL } = require('url');
-const { spawn, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const { loadResume, findSources, resumeCacheUsable } = require('./resume');
 const { buildResumeContext } = require('./resume-context');
 const { mergeWithOverlapDedupe } = require('./transcript-merge');
 const { ConfigStore } = require('./config');
+const {
+  SAMPLE_RATE,
+  BYTES_PER_SAMPLE,
+  pcmToWav,
+  rms,
+  transcribe,
+  probeMimo,
+} = require('./asr');
 const {
   PORTABLE_ENV,
   parseSigningKind,
@@ -29,8 +37,6 @@ const {
 const APP_ROOT = __dirname;
 const IS_MAC = process.platform === 'darwin';
 const IS_WIN = process.platform === 'win32';
-const SAMPLE_RATE = 16000;
-const BYTES_PER_SAMPLE = 2;
 const TMP_DIR = path.join(os.tmpdir(), 'interviewqa');
 const SUPPORTED_RESUME_EXTS = ['pdf', 'txt', 'md', 'markdown'];
 
@@ -125,7 +131,7 @@ process.on('uncaughtException', (err) => {
   console.error(`[未捕获异常] ${err && err.stack ? err.stack : err}`);
 });
 
-let currentStatus = { state: 'loading', message: '正在加载语音模型…' };
+let currentStatus = { state: 'loading', message: '正在启动…' };
 
 function setStatus(state, message) {
   currentStatus = { state, message };
@@ -139,316 +145,12 @@ function setResumeStatus(payload) {
   send('resume:status', payload);
 }
 
-// ---------------------------------------------------------------- 音频工具
-
-function wavHeader(dataLength) {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0);
-  header.writeUInt32LE(36 + dataLength, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // 单声道
-  header.writeUInt32LE(SAMPLE_RATE, 24);
-  header.writeUInt32LE(SAMPLE_RATE * BYTES_PER_SAMPLE, 28);
-  header.writeUInt16LE(BYTES_PER_SAMPLE, 32);
-  header.writeUInt16LE(16, 34);
-  header.write('data', 36);
-  header.writeUInt32LE(dataLength, 40);
-  return header;
-}
-
-function rmsOfInt16(buf) {
-  const count = Math.floor(buf.length / BYTES_PER_SAMPLE);
-  if (count <= 0) return 0;
-  const view = new Int16Array(buf.buffer, buf.byteOffset, count);
-  let sum = 0;
-  for (let i = 0; i < count; i++) {
-    const v = view[i] / 32768;
-    sum += v * v;
-  }
-  return Math.sqrt(sum / count);
-}
-
-// ---------------------------------------------------------------- 转写 worker 池
-
-/**
- * 本地 Whisper 引擎的 Python 解释器位置。
- * Windows 的 venv 在 .venv/Scripts/python.exe，macOS / Linux 在 .venv/bin/python3。
- * 打包版不带虚拟环境，此时返回 null，由调用方给出明确提示。
- */
-function localPythonPath() {
-  const candidates = IS_WIN
-    ? [path.join(APP_ROOT, '.venv', 'Scripts', 'python.exe')]
-    : [
-        path.join(APP_ROOT, '.venv', 'bin', 'python3'),
-        path.join(APP_ROOT, '.venv', 'bin', 'python'),
-      ];
-  return candidates.find((file) => fs.existsSync(file)) || null;
-}
-
-class SttWorker {
-  constructor(index, pool, cfg) {
-    this.index = index;
-    this.pool = pool;
-    this.ready = false;
-    this.task = null;
-    this.buffer = '';
-    this.failed = false;
-    this.python = localPythonPath();
-
-    const script = path.join(APP_ROOT, 'stt', 'worker.py');
-    if (!this.python) {
-      throw new Error(
-        IS_WIN
-          ? '未找到本地语音引擎（.venv\\Scripts\\python.exe）。本地引擎需要先在项目目录创建 Python 虚拟环境并安装 faster-whisper。'
-          : '未找到本地语音引擎（.venv/bin/python3）。本地引擎需要先在项目目录创建 Python 虚拟环境并安装 faster-whisper。'
-      );
-    }
-    if (!fs.existsSync(script)) {
-      throw new Error('缺少本地语音引擎脚本 stt/worker.py');
-    }
-
-    this.proc = spawn(this.python, [script], {
-      cwd: APP_ROOT,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUNBUFFERED: '1',
-        HF_ENDPOINT: 'https://hf-mirror.com',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    this.proc.stdout.on('data', (data) => this.onData(data));
-    this.proc.stderr.on('data', (data) => {
-      const text = data.toString().trim();
-      if (text) console.log(`[stt-${index}] ${text.slice(0, 300)}`);
-    });
-    // 必须监听 error：否则 spawn 失败会抛出未捕获的 Error 事件
-    this.proc.on('error', (err) => {
-      this.failed = true;
-      this.ready = false;
-      console.error(`[stt-${index}] 进程启动失败：${err.message}`);
-      send('error', { message: `本地语音引擎启动失败：${err.message}` });
-      const task = this.task;
-      this.task = null;
-      if (task) task.cb('', `本地语音引擎启动失败：${err.message}`);
-      this.pool.onWorkerFailed(this);
-    });
-    this.proc.on('exit', (code) => {
-      console.log(`[stt-${index}] 进程退出 code=${code}`);
-      this.ready = false;
-      const task = this.task;
-      this.task = null;
-      if (task) task.cb('', '转写进程异常退出');
-      this.pool.onWorkerFailed(this);
-    });
-
-    this.proc.stdin.write(JSON.stringify({ whisper: cfg.whisper }) + '\n');
-  }
-
-  onData(data) {
-    this.buffer += data.toString('utf8');
-    let idx;
-    while ((idx = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, idx).trim();
-      this.buffer = this.buffer.slice(idx + 1);
-      if (!line) continue;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch (err) {
-        continue;
-      }
-      if (msg.event === 'ready') {
-        this.ready = true;
-        this.pool.onWorkerReady(this);
-      } else if (msg.event === 'error') {
-        console.error(`[stt-${this.index}] ${msg.error}`);
-        send('error', { message: `语音模型加载失败：${msg.error}` });
-      } else if (msg.event === 'log') {
-        console.log(`[stt-${this.index}] ${msg.message}`);
-      } else if (msg.id !== undefined) {
-        const task = this.task;
-        this.task = null;
-        try {
-          if (task && task.wav) fs.unlinkSync(task.wav);
-        } catch (err) {
-          /* 忽略删除失败 */
-        }
-        if (task && task.id === msg.id) task.cb(msg.text || '', msg.error);
-        this.pool.pump();
-      }
-    }
-  }
-
-  submit(task) {
-    this.task = task;
-    this.proc.stdin.write(JSON.stringify({ cmd: 'transcribe', id: task.id, wav: task.wav }) + '\n');
-  }
-
-  kill() {
-    try {
-      this.proc.stdin.write(JSON.stringify({ cmd: 'exit' }) + '\n');
-    } catch (err) {
-      /* ignore */
-    }
-  }
-}
-
-class WorkerPool {
-  constructor(cfg) {
-    this.queue = [];
-    this.workers = [];
-    this.readyCount = 0;
-    this.deadCount = 0;
-    const size = Math.max(1, cfg.whisper.workers || 1);
-    for (let i = 0; i < size; i++) this.workers.push(new SttWorker(i, this, cfg));
-  }
-
-  /** 至少一个 worker 可用即可开始转写 */
-  get ready() {
-    return this.readyCount > 0;
-  }
-
-  /** 所有 worker 都已有结果（就绪或已失败） */
-  get settled() {
-    return this.readyCount + this.deadCount >= this.workers.length;
-  }
-
-  onWorkerReady() {
-    this.readyCount++;
-    // 惰性启动（云端引擎失败后回退）时不要干扰当前状态提示
-    if (((CONFIG.stt && CONFIG.stt.engine) || 'mimo') !== 'local') {
-      if (this.settled) console.log('[stt] 本地 worker 已就绪（备用）');
-      return;
-    }
-    if (this.readyCount >= this.workers.length) {
-      console.log('[stt] 全部 worker 就绪');
-      setStatus('idle', '语音模型就绪，点击录音开始');
-    } else if (!this.settled) {
-      setStatus('loading', `正在加载语音模型（${this.readyCount}/${this.workers.length}）…`);
-    }
-  }
-
-  onWorkerFailed() {
-    this.deadCount++;
-    if (this.ready) return; // 还有别的 worker 能干活，不影响使用
-    if (!this.settled) return;
-    console.error('[stt] 本地 worker 全部启动失败');
-    setStatus('idle', '本地语音引擎不可用，请在设置里改用云端识别');
-  }
-
-  submit(task) {
-    this.queue.push(task);
-    this.pump();
-  }
-
-  pump() {
-    while (this.queue.length) {
-      const worker = this.workers.find((w) => w.ready && !w.task);
-      if (!worker) return;
-      worker.submit(this.queue.shift());
-    }
-  }
-
-  killAll() {
-    this.workers.forEach((w) => w.kill());
-  }
-}
-
-let pool = null;
-let poolError = null;
-
-function ensureLocalPool() {
-  if (pool || poolError) return pool;
-  try {
-    pool = new WorkerPool(CONFIG);
-  } catch (err) {
-    poolError = err.message;
-    console.error(`[stt] 本地引擎不可用：${poolError}`);
-    send('error', { message: poolError });
-  }
-  return pool;
-}
-
-/** 本地 Whisper 转写（按需惰性启动 worker） */
-function localTranscribe(wavPath) {
-  return new Promise((resolve, reject) => {
-    const activePool = ensureLocalPool();
-    if (!activePool) {
-      reject(new Error(poolError || '本地语音引擎不可用'));
-      return;
-    }
-    activePool.submit({
-      id: `${Date.now()}-${Math.random()}`,
-      wav: wavPath,
-      cb: (text, error) => (error ? reject(new Error(error)) : resolve(text)),
-    });
-  });
-}
+// ---------------------------------------------------------------- 转写
 
 /** MiMo-V2.5-ASR 云端转写：音频转 base64 后走 chat/completions */
 function mimoTranscribe(wavPath) {
-  const cfg = (CONFIG.stt && CONFIG.stt.mimo) || {};
-  return new Promise((resolve, reject) => {
-    let audio;
-    try {
-      audio = fs.readFileSync(wavPath).toString('base64');
-    } catch (err) {
-      return reject(err);
-    }
-    const body = JSON.stringify({
-      model: cfg.model,
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'input_audio', input_audio: { data: `data:audio/wav;base64,${audio}` } }],
-        },
-      ],
-      asr_options: { language: cfg.language || 'zh' },
-    });
-    const url = new URL(`${cfg.baseUrl}/chat/completions`);
-    const req = https.request(
-      {
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: url.pathname,
-        method: 'POST',
-        agent: keepAliveAgent,
-        headers: {
-          'api-key': cfg.apiKey,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let data = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => (data += c));
-        res.on('end', () => {
-          if (res.statusCode >= 400) return reject(new Error(`MiMo ${res.statusCode} ${data.slice(0, 160)}`));
-          try {
-            const json = JSON.parse(data);
-            const choice = json.choices && json.choices[0];
-            const text = (choice && ((choice.message && choice.message.content) || (choice.delta && choice.delta.content))) || '';
-            resolve(String(text).trim());
-          } catch (err) {
-            reject(new Error('MiMo 返回解析失败'));
-          }
-        });
-      }
-    );
-    req.on('error', reject);
-    req.setTimeout(cfg.timeoutMs || 30000, () => req.destroy(new Error('MiMo 请求超时')));
-    req.write(body);
-    req.end();
-  });
+  return transcribe(CONFIG.stt.mimo, fs.readFileSync(wavPath), { agent: keepAliveAgent });
 }
-
-// ---------------------------------------------------------------- 转写调度（云端优先 + 并发 + 本地兜底）
 
 const asrQueue = { active: 0, tasks: [] };
 
@@ -470,28 +172,14 @@ function pumpAsr() {
 }
 
 async function runAsrTask(task) {
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
-  const fallback = CONFIG.stt ? CONFIG.stt.fallbackToLocal !== false : true;
   try {
-    if (engine === 'mimo') {
-      if (!store.hasMimoKey()) {
-        task.cb('', '未配置 MiMo ASR API Key，请在设置里补齐后再录音');
-        return;
-      }
-      try {
-        task.cb(await mimoTranscribe(task.wavPath), null);
-        return;
-      } catch (err) {
-        console.error(`[MiMo 失败] ${err.message}`);
-        if (!fallback) {
-          task.cb('', err.message);
-          return;
-        }
-        console.log('[转写] 回退到本地 Whisper');
-      }
+    if (!store.hasMimoKey()) {
+      task.cb('', '未配置 MiMo ASR API Key，请在设置里补齐后再录音');
+      return;
     }
-    task.cb(await localTranscribe(task.wavPath), null);
+    task.cb(await mimoTranscribe(task.wavPath), null);
   } catch (err) {
+    console.error(`[MiMo 失败] ${err.message}`);
     task.cb('', err.message || String(err));
   } finally {
     try {
@@ -557,13 +245,13 @@ function maybeCut() {
 function dispatchChunk(slice) {
   const id = state.chunkSeq++;
   const threshold = CONFIG.chunk.silenceThresholdRms;
-  if (rmsOfInt16(slice) < threshold * 0.5) {
+  if (rms(slice) < threshold * 0.5) {
     // 纯静音段：直接跳过转写，省时间也避免幻觉
     onChunkDone(id, '', null);
     return;
   }
   const file = path.join(TMP_DIR, `chunk_${state.sessionId}_${id}.wav`);
-  fs.writeFileSync(file, Buffer.concat([wavHeader(slice.length), slice]));
+  fs.writeFileSync(file, pcmToWav(slice));
   console.log(`[切片 #${id}] ${(slice.length / BYTES_PER_SAMPLE / SAMPLE_RATE).toFixed(1)}s`);
   submitAsr(file, (text, error) => onChunkDone(id, text, error));
 }
@@ -928,19 +616,15 @@ ipcMain.handle('resume:reload', async () => {
   return currentResumeStatus;
 });
 
-/** 当前转写引擎是否可用：云端引擎看 Key，本地引擎看 worker 是否加载完模型 */
-function sttReady() {
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
-  if (engine === 'mimo') return store.hasMimoKey();
-  return !!(pool && pool.ready);
+/** 转写链路是否就绪：云端识别只取决于 Key 是否配置 */
+function asrReady() {
+  return store.hasMimoKey();
 }
 
 /** 录音前的可用性检查，返回可直接展示给用户的原因 */
 function recordingBlockReason() {
   if (!store.hasDeepSeekKey()) return '还没有配置 DeepSeek API Key，点右上角「设置」补齐';
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
-  if (engine === 'mimo' && !store.hasMimoKey()) return '还没有配置 MiMo 语音识别 API Key，点右上角「设置」补齐';
-  if (engine === 'local' && !(pool && pool.ready)) return '本地语音引擎还在加载，请稍候几秒';
+  if (!store.hasMimoKey()) return '还没有配置 MiMo 语音识别 API Key，点右上角「设置」补齐';
   return null;
 }
 
@@ -970,26 +654,46 @@ function abortAnswer() {
 
 ipcMain.handle('answer:abort', () => ({ ok: abortAnswer() }));
 
+const SOURCE_LABEL = { system: '电脑播放的声音', microphone: '麦克风' };
+
+/** 当前音源：system 采集电脑播放的声音，microphone 采集麦克风 */
+function currentSource() {
+  const source = (CONFIG.audio && CONFIG.audio.source) || 'system';
+  return source === 'microphone' ? 'microphone' : 'system';
+}
+
 ipcMain.handle('recording:start', () => {
   const blocked = recordingBlockReason();
   if (blocked) return { ok: false, message: blocked, needsSetup: store.needsSetup() };
   resetSession();
   state.recording = true;
-  setStatus('recording', '正在录制电脑播放的声音…');
+  setStatus('recording', `正在录制${SOURCE_LABEL[currentSource()]}…`);
   return { ok: true };
 });
 
 /**
- * 系统声音采集是否具备前提条件。
- * macOS 上屏幕录制权限是硬前提：没有授权时 desktopCapturer 拿不到任何音源，
- * 表现成「点了录音没有任何反应」，所以这里提前查权限并给出可操作的指引。
+ * 采集权限状态。
+ * macOS 上「系统声音」与「麦克风」各走一套权限体系，缺权限时表现为
+ * 「点了录音没有任何反应」，所以两类权限都提前查，并给出可操作的指引。
+ *
+ * 每项返回三个字段：
+ *   granted 权限是否已经拿到；usable 是否可以尝试采集（未询问过也算可以尝试，
+ *   由系统在真正采集时弹框）；message 仅在不可用时给出，可直接展示给用户。
  */
-function capturePrerequisite() {
-  if (!IS_MAC) return null;
+function screenAccess() {
+  // Windows 走 WASAPI 回环，不需要授权
+  if (!IS_MAC) {
+    return { kind: 'screen', label: '电脑声音', granted: true, usable: true, status: 'granted', message: null };
+  }
   const status = systemPreferences.getMediaAccessStatus('screen');
-  if (status === 'granted') return null;
+  if (status === 'granted') {
+    return { kind: 'screen', label: '电脑声音', granted: true, usable: true, status, message: null };
+  }
   return {
-    denied: true,
+    kind: 'screen',
+    label: '电脑声音',
+    granted: false,
+    usable: false,
     status,
     message:
       status === 'not-determined'
@@ -998,18 +702,70 @@ function capturePrerequisite() {
   };
 }
 
-ipcMain.handle('capture:status', () => {
-  const block = capturePrerequisite();
-  return block || { granted: true };
+function microphoneAccess() {
+  if (!IS_MAC && !IS_WIN) {
+    return { kind: 'microphone', label: '麦克风', granted: true, usable: true, status: 'unknown', message: null };
+  }
+  let status = 'unknown';
+  try {
+    status = systemPreferences.getMediaAccessStatus('microphone');
+  } catch (err) {
+    status = 'unknown';
+  }
+  const granted = status === 'granted';
+  // 未询问过（not-determined）与查不到结论（unknown）都不拦用户，交给真实的采集调用去要权限
+  const usable = status !== 'denied' && status !== 'restricted';
+  return {
+    kind: 'microphone',
+    label: '麦克风',
+    granted,
+    usable,
+    status,
+    message: usable
+      ? null
+      : IS_MAC
+        ? '麦克风权限被拒绝，无法用麦克风提问。请到「系统设置 → 隐私与安全性 → 麦克风」中勾选本应用，然后重新打开应用。'
+        : '系统未允许本应用使用麦克风，请在「设置 → 隐私和安全性 → 麦克风」中开启后重试。',
+  };
+}
+
+function captureStatus() {
+  return {
+    platform: process.platform,
+    source: currentSource(),
+    screen: screenAccess(),
+    microphone: microphoneAccess(),
+  };
+}
+
+ipcMain.handle('capture:status', () => captureStatus());
+
+/**
+ * 申请麦克风权限。
+ * macOS 首次会弹出系统授权框；已经授权时是幂等的，不会重复打扰。
+ */
+ipcMain.handle('capture:requestMicrophone', async () => {
+  const before = microphoneAccess();
+  if (before.granted) return { ok: true, access: before };
+  if (!IS_MAC) return { ok: before.usable, access: before };
+  if (before.status === 'not-determined') {
+    try {
+      await systemPreferences.askForMediaAccess('microphone');
+    } catch (err) {
+      return { ok: false, message: err.message, access: microphoneAccess() };
+    }
+  }
+  const after = microphoneAccess();
+  return { ok: after.granted, access: after };
 });
 
-ipcMain.handle('capture:openPrivacy', () => {
+ipcMain.handle('capture:openPrivacy', (_event, kind) => {
   if (!IS_MAC) return { ok: false };
   const urls = {
     screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
     microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
   };
-  const target = urls.screen;
+  const target = urls[kind] || urls.screen;
   shell.openExternal(target).catch(() => {});
   return { ok: true, url: target };
 });
@@ -1055,7 +811,6 @@ function resumeStateView() {
 
 /** 引导页面初始状态：缺什么、权限怎么样、简历目录在哪 */
 function setupState() {
-  const privacy = capturePrerequisite();
   return {
     needsSetup: store.needsSetup(),
     setupDone: !!(CONFIG.ui && CONFIG.ui.setupDone),
@@ -1064,11 +819,16 @@ function setupState() {
     platform: process.platform,
     appVersion: app.getVersion(),
     resume: resumeStateView(),
-    privacy,
+    capture: captureStatus(),
+    audio: {
+      source: currentSource(),
+      deviceId: (CONFIG.audio && CONFIG.audio.deviceId) || '',
+      deviceLabel: (CONFIG.audio && CONFIG.audio.deviceLabel) || '',
+    },
   };
 }
 
-/** 保存设置后统一刷新：重载配置、按需重启本地引擎、重新解析简历 */
+/** 保存设置后统一刷新：重载配置、同步状态、重新解析简历 */
 async function applySettings(patch) {
   const result = store.update(patch);
   if (!result.ok) return { ok: false, message: result.message, view: store.safeView() };
@@ -1076,16 +836,11 @@ async function applySettings(patch) {
   const before = CONFIG;
   refreshConfig();
 
-  if (before.stt.engine !== CONFIG.stt.engine) {
-    if (CONFIG.stt.engine === 'local') {
-      setStatus('loading', '正在加载本地语音模型…');
-      ensureLocalPool();
-    } else if (pool) {
-      console.log('[stt] 已切换到云端引擎，本地 worker 保持待命');
-    }
-  }
   if (before.deepseekApiKey !== CONFIG.deepseekApiKey) warmUpConnection();
   if (before.resume.enabled !== CONFIG.resume.enabled) await initResume();
+  if (before.audio.source !== CONFIG.audio.source) {
+    console.log(`[音频] 音源切换为${SOURCE_LABEL[currentSource()]}`);
+  }
 
   return { ok: true, view: store.safeView(), resume: resumeStateView() };
 }
@@ -1119,7 +874,11 @@ ipcMain.handle('setup:pickResume', async () => {
   return { ok: true, added, resume: resumeStateView() };
 });
 
-ipcMain.handle('settings:get', () => ({ ...store.safeView(), resume: resumeStateView(), privacy: capturePrerequisite() }));
+ipcMain.handle('settings:get', () => ({
+  ...store.safeView(),
+  resume: resumeStateView(),
+  capture: captureStatus(),
+}));
 
 ipcMain.handle('settings:save', async (_event, patch) => applySettings(patch));
 
@@ -1174,8 +933,12 @@ ipcMain.handle('settings:testDeepSeek', () => {
       },
       (res) => {
         res.resume();
-        if (res.statusCode === 200) return resolve({ ok: true, message: 'DeepSeek 连接正常' });
-        if (res.statusCode === 401) return resolve({ ok: false, message: 'DeepSeek API Key 无效（401）' });
+        if (res.statusCode === 200) return resolve({ ok: true, message: 'DeepSeek 连接正常，Key 有效' });
+        if (res.statusCode === 401) return resolve({ ok: false, message: 'DeepSeek API Key 无效（401），请重新复制' });
+        if (res.statusCode === 402) return resolve({ ok: false, message: 'DeepSeek 账户额度不足（402），请先充值' });
+        if (res.statusCode === 404) return resolve({ ok: false, message: `DeepSeek 接口地址不对（404）：${CONFIG.deepseekBaseUrl}` });
+        if (res.statusCode === 429) return resolve({ ok: false, message: 'DeepSeek 提示请求过于频繁（429），稍后重试' });
+        if (res.statusCode >= 500) return resolve({ ok: false, message: `DeepSeek 服务端出错（HTTP ${res.statusCode}），稍后重试` });
         resolve({ ok: false, message: `DeepSeek 返回 HTTP ${res.statusCode}` });
       }
     );
@@ -1184,6 +947,13 @@ ipcMain.handle('settings:testDeepSeek', () => {
     req.end();
   });
 });
+
+/**
+ * 语音识别自检：用一段静音音频走一次真实转写。
+ * 只打一个接口不够——Key、接口地址、模型名、网络四项里任何一项不对，
+ * 都会在真实转写时才暴露，所以这里直接跑完整条链路。
+ */
+ipcMain.handle('settings:testMimo', () => probeMimo(CONFIG.stt.mimo, { agent: keepAliveAgent }));
 
 // ------------------------------------------------------------------ 自动更新
 //
@@ -1236,8 +1006,7 @@ ipcMain.handle('app:info', () => ({
   configPath: CONFIG_PATH,
   resumeDir: RESUME_DIR,
   userDir: USER_DIR,
-  engine: (CONFIG.stt && CONFIG.stt.engine) || 'mimo',
-  localEngineAvailable: !app.isPackaged && !!localPythonPath(),
+  audioSource: currentSource(),
   updateMode: UPDATE_MODE,
   portable: IS_PORTABLE,
   signingKind: SIGNING_KIND,
@@ -1248,7 +1017,7 @@ function handlePcm(chunk) {
   state.pending = Buffer.concat([state.pending, chunk]);
 
   const duration = chunk.length / BYTES_PER_SAMPLE / SAMPLE_RATE;
-  if (rmsOfInt16(chunk) < CONFIG.chunk.silenceThresholdRms) state.silenceTail += duration;
+  if (rms(chunk) < CONFIG.chunk.silenceThresholdRms) state.silenceTail += duration;
   else state.silenceTail = 0;
 
   maybeCut();
@@ -1267,7 +1036,10 @@ function stopRecording() {
   flushTailParallel();
 
   if (state.chunkSeq === 0) {
-    setStatus('idle', '没有录到声音，检查电脑是否正在播放');
+    setStatus(
+      'idle',
+      currentSource() === 'microphone' ? '没有录到声音，检查麦克风是否选对并已开启' : '没有录到声音，检查电脑是否正在播放'
+    );
     send('transcript:final', { text: '' });
     return;
   }
@@ -1291,16 +1063,17 @@ ipcMain.handle('recording:cancel', () => {
 });
 
 // ---------------------------------------------------------------- 自检模式
-// npm run selftest：用 stt/test_sample.wav 模拟一次录音，跑通「切片 → 并行转写 → 拼接 → 回答 → 界面」
+// npm run selftest：用 scripts/fixtures/test_sample.wav 模拟一次录音，
+// 跑通「切片 → 并行转写 → 拼接 → 回答 → 界面」
 
 function runSelfTest() {
-  const wav = path.join(APP_ROOT, 'stt', 'test_sample.wav');
+  const wav = path.join(APP_ROOT, 'scripts', 'fixtures', 'test_sample.wav');
   if (!fs.existsSync(wav)) {
     console.log(`[自检] 缺少测试音频：${wav}`);
     return;
   }
   const waitReady = setInterval(() => {
-    if (!sttReady()) return;
+    if (!asrReady()) return;
     if (currentResumeStatus.state === 'loading') return; // 等简历解析/加载有结果
     clearInterval(waitReady);
     console.log('[自检] 开始模拟录音');
@@ -1462,24 +1235,41 @@ function installDisplayMediaHandler() {
   );
 }
 
+/**
+ * 媒体权限：只放行音频采集。
+ * 用麦克风提问走 getUserMedia，需要在这里显式放行；
+ * 摄像头一律拒绝——本应用不需要，也不该在用户不知情时打开。
+ */
+function installPermissionHandlers() {
+  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback, details) => {
+    if (permission === 'media') {
+      const types = (details && details.mediaTypes) || ['audio'];
+      return callback(types.every((type) => type === 'audio'));
+    }
+    if (permission === 'display-capture') return callback(true);
+    callback(false);
+  });
+  session.defaultSession.setPermissionCheckHandler((_contents, permission, _origin, details) => {
+    if (permission === 'media') return !details || details.mediaType !== 'video';
+    return permission === 'display-capture';
+  });
+}
+
 app.whenReady().then(() => {
   installDisplayMediaHandler();
+  installPermissionHandlers();
   applyAppMenu();
 
   if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
   createWindow();
 
-  const engine = (CONFIG.stt && CONFIG.stt.engine) || 'mimo';
   if (store.needsSetup()) {
     // 首次启动：由渲染进程弹出引导，先把 Key 和简历补齐再进入使用
     setStatus('idle', '先完成初始化设置，再开始使用');
     console.log('[启动] 检测到尚未完成初始化，等待引导设置');
-  } else if (engine === 'local') {
-    setStatus('loading', '正在加载本地语音模型…');
-    ensureLocalPool();
   } else {
     setStatus('idle', '就绪，点击录音开始或直接在下方输入问题');
-    console.log(`[stt] 使用云端引擎：${(CONFIG.stt.mimo && CONFIG.stt.mimo.model) || 'mimo'}`);
+    console.log(`[启动] 音源=${SOURCE_LABEL[currentSource()]} 识别模型=${(CONFIG.stt.mimo && CONFIG.stt.mimo.model) || 'mimo'}`);
   }
   warmUpConnection();
   initResume(); // 异步：首次解析简历，之后复用缓存，不阻塞界面
@@ -1498,5 +1288,4 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   appUpdater.stop();
-  if (pool) pool.killAll();
 });

@@ -37,7 +37,7 @@ jobs:
 
       - name: 语法检查
         run: |
-          for file in main.js config.js preload.js resume.js resume-context.js \
+          for file in main.js asr.js config.js preload.js resume.js resume-context.js \
                       transcript-merge.js update.js start.js test-resume-context.js scripts/*.js; do
             echo "检查 $file"
             node --check "$file"
@@ -48,6 +48,11 @@ jobs:
 
       - name: 转写拼接自测
         run: npm run test:merge
+
+      # WAV 封装与 HTTP 结论归类都是纯逻辑，不联网也能断言，
+      # 把「静音探测音频是否合法」「401 / 404 各该说什么话」钉死在用例里
+      - name: 语音识别自测
+        run: npm run test:asr
 
       # 更新判定与状态迁移全是纯逻辑，不联网也能断言，
       # 把「什么情况下允许自我替换」这类判断钉死在用例里
@@ -79,7 +84,7 @@ jobs:
       - name: 简历链路自检（解析 / 缓存 / 失效 / 注入）
         run: npm run test:resume
 
-      - name: 界面冒烟测试（引导向导 + 设置面板 + 更新入口）
+      - name: 界面冒烟测试（引导向导 + 音源切换 + 连接自检 + 设置面板 + 更新入口）
         run: |
           sudo apt-get update -qq
           # Electron 在无显示环境下运行需要的库；不同 Ubuntu 版本包名不同，逐个容错安装
@@ -279,6 +284,18 @@ jobs:
             # 更新模块必须真的进包，否则运行时根本走不到检查更新
             if ! grep -q "^/update.js$" /tmp/asar-list.txt; then
               echo "::error::${app} 包内缺少 update.js"
+              exit 1
+            fi
+
+            # 语音识别层同理：转写与自检都在这里，缺了应用只剩输入框可用
+            if ! grep -q "^/asr.js$" /tmp/asar-list.txt; then
+              echo "::error::${app} 包内缺少 asr.js"
+              exit 1
+            fi
+
+            # 本地引擎已经整体移除，包里不该再出现 Python 成分
+            if grep -qE "^/stt/|\.py$" /tmp/asar-list.txt; then
+              echo "::error::${app} 包内残留本地语音引擎文件"
               exit 1
             fi
 

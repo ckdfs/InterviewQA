@@ -19,8 +19,6 @@ const DEFAULT_CONFIG = {
   deepseekBaseUrl: 'https://api.deepseek.com',
   deepseekModel: 'deepseek-flash',
   stt: {
-    engine: 'mimo',
-    fallbackToLocal: false,
     maxConcurrent: 4,
     mimo: {
       apiKey: '',
@@ -30,15 +28,12 @@ const DEFAULT_CONFIG = {
       timeoutMs: 30000,
     },
   },
-  whisper: {
-    model: 'small',
-    computeType: 'int8',
-    device: 'cpu',
-    workers: 3,
-    threads: 6,
-    language: 'zh',
-    beamSize: 1,
-    initialPrompt: '以下是一段普通话的面试问题或对话，请准确转写为简体中文。',
+  audio: {
+    // system: 采集电脑正在播放的声音；microphone: 采集麦克风
+    source: 'system',
+    // 麦克风设备：deviceId 是首选，deviceId 变化时用 deviceLabel 兜底匹配
+    deviceId: '',
+    deviceLabel: '',
   },
   chunk: {
     targetSeconds: 8,
@@ -77,8 +72,9 @@ const EDITABLE = {
   'stt.mimo.baseUrl': { type: 'url' },
   'stt.mimo.model': { type: 'string' },
   'stt.mimo.language': { type: 'string' },
-  'stt.engine': { type: 'enum', values: ['mimo', 'local'] },
-  'stt.fallbackToLocal': { type: 'boolean' },
+  'audio.source': { type: 'enum', values: ['system', 'microphone'] },
+  'audio.deviceId': { type: 'string' },
+  'audio.deviceLabel': { type: 'string' },
   'resume.enabled': { type: 'boolean' },
   'resume.contextMode': { type: 'enum', values: ['smart', 'all', 'none'] },
   'answer.maxChars': { type: 'int', min: 80, max: 800 },
@@ -190,12 +186,6 @@ class ConfigStore {
     data.resume.dir = this.dir;
     data.resume.profileFile = this.profileFile;
 
-    // 打包版不带 Python 运行时，本地引擎不可用：回落到云端引擎
-    if (this.isPackaged && data.stt.engine === 'local') {
-      console.log('[配置] 打包版不支持本地 Whisper 引擎，已改用云端 ASR');
-      data.stt.engine = 'mimo';
-    }
-
     this.data = data;
     return data;
   }
@@ -270,8 +260,9 @@ class ConfigStore {
       mimoBaseUrl: this.data.stt.mimo.baseUrl,
       mimoModel: this.data.stt.mimo.model,
       mimoLanguage: this.data.stt.mimo.language,
-      sttEngine: this.data.stt.engine,
-      fallbackToLocal: this.data.stt.fallbackToLocal,
+      audioSource: this.data.audio.source,
+      audioDeviceId: this.data.audio.deviceId,
+      audioDeviceLabel: this.data.audio.deviceLabel,
       resumeEnabled: this.data.resume.enabled,
       contextMode: this.data.resume.contextMode,
       maxChars: this.data.answer.maxChars,
