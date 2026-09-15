@@ -59,6 +59,11 @@ jobs:
       - name: 自动更新自测
         run: npm run test:update
 
+      # 配置层的读写不依赖 Electron，可以在普通 Node 里断言。
+      # 重点是环境变量只能作用于本次运行，绝不能落盘顶掉用户填的 Key。
+      - name: 配置层自测
+        run: npm run test:config
+
       # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
       # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
       - name: 缓存 Electron 二进制

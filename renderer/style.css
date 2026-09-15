@@ -225,6 +225,38 @@ select {
   border-color: var(--danger-border);
 }
 
+/* 报错行旁边的重试按钮：圆形红色图标，只占一个图标的位置，不抢对话的视觉重量 */
+.retry-btn {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--danger);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.retry-btn:hover {
+  background: #c93a3f;
+}
+
+.retry-btn:active {
+  transform: translateY(1px);
+}
+
+.retry-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+
 .btn-link {
   height: auto;
   padding: 0;

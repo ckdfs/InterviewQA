@@ -112,6 +112,17 @@ function readByPath(obj, dotted) {
   return dotted.split('.').reduce((acc, k) => (acc == null ? acc : acc[k]), obj);
 }
 
+/** 删除 dotted 路径上的字段，用于把只在运行期存在的字段排除在写盘之外 */
+function deleteByPath(obj, dotted) {
+  const parts = dotted.split('.');
+  let cursor = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cursor = cursor[parts[i]];
+    if (typeof cursor !== 'object' || cursor === null) return;
+  }
+  delete cursor[parts[parts.length - 1]];
+}
+
 function writeByPath(obj, dotted, value) {
   const parts = dotted.split('.');
   let cursor = obj;
@@ -176,30 +187,54 @@ class ConfigStore {
         console.error(`[配置] ${this.file} 解析失败，改用默认值：${err.message}`);
       }
     }
+    this.persisted = persisted;
     const data = mergeDefaults(DEFAULT_CONFIG, persisted);
+    this.data = data;
 
-    // 环境变量覆盖（CI / 免改文件启动）
-    if (process.env.DEEPSEEK_API_KEY) data.deepseekApiKey = process.env.DEEPSEEK_API_KEY;
-    if (process.env.MIMO_API_KEY) data.stt.mimo.apiKey = process.env.MIMO_API_KEY;
+    // 环境变量覆盖（CI / 免改文件启动）。覆盖只作用于本次运行：
+    // 写盘时这几项会还原成磁盘上的原值，否则任何一次保存都会把环境变量里的 Key
+    // 落进 config.json，把用户原先填在里面的 Key 顶掉。
+    this.envOverridden = [];
+    this.overrideFromEnv('deepseekApiKey', process.env.DEEPSEEK_API_KEY);
+    this.overrideFromEnv('stt.mimo.apiKey', process.env.MIMO_API_KEY);
 
     // 简历目录固定指向可写目录，避免打包后指向只读的 app.asar
     data.resume.dir = this.dir;
     data.resume.profileFile = this.profileFile;
 
-    this.data = data;
     return data;
+  }
+
+  /** 记下一项来自环境变量的运行期覆盖 */
+  overrideFromEnv(path, value) {
+    if (!value) return;
+    this.envOverridden.push(path);
+    writeByPath(this.data, path, value);
   }
 
   get() {
     return this.data;
   }
 
+  /** 落盘内容：把被环境变量盖住的那几项还原成磁盘上的值 */
+  diskData() {
+    const out = clone(this.data);
+    for (const path of this.envOverridden) {
+      const original = readByPath(this.persisted, path);
+      if (original === undefined) deleteByPath(out, path);
+      else writeByPath(out, path, original);
+    }
+    return out;
+  }
+
   /** 原子写回磁盘：先写临时文件再改名，避免写到一半断电留下半截 JSON */
   persist() {
+    const disk = this.diskData();
     const tmp = `${this.file}.tmp`;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
+    fs.writeFileSync(tmp, `${JSON.stringify(disk, null, 2)}\n`, 'utf8');
     fs.renameSync(tmp, this.file);
+    this.persisted = disk;
   }
 
   /**
@@ -220,6 +255,11 @@ class ConfigStore {
       return { ok: false, message: err.message, config: this.data };
     }
     this.data = next;
+    // 用户在设置里显式改过的字段不再受环境变量约束，否则写盘时会被还原成磁盘上的旧值
+    for (const dotted of Object.keys(patch)) {
+      const idx = this.envOverridden.indexOf(dotted);
+      if (idx !== -1) this.envOverridden.splice(idx, 1);
+    }
     this.persist();
     return { ok: true, config: this.data };
   }

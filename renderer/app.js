@@ -130,6 +130,7 @@ let workletNode = null;
 let muteGain = null;
 let userBubble = null;
 let aiBubble = null;
+let pendingRetry = false; // 下一次作答是重试同一次提问，沿用已有问题气泡，不再插一条相同的
 
 // ---------------------------------------------------------------- 轻提示
 
@@ -189,6 +190,71 @@ function addRow(who, text, extraClass) {
   el.chat.appendChild(row);
   scrollToBottom();
   return bubble;
+}
+
+/** 重试图标：环形箭头，与界面上其他图标一样用 SVG 画，不依赖字体或图片 */
+const RETRY_ICON_PATH =
+  'M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-8 8s3.57 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z';
+
+function createRetryIcon() {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', RETRY_ICON_PATH);
+  svg.appendChild(path);
+  return svg;
+}
+
+/** 报错行。可恢复的失败把下一步操作一并给出，不让用户自己猜该做什么。 */
+function addErrorRow(message, retry) {
+  const bubble = addRow('ai', message, 'is-error');
+  const row = bubble.parentNode;
+
+  if (retry) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    // 图标按钮没有文字，用途靠 title 与 aria-label 说明，鼠标悬停也能看到
+    btn.className = 'retry-btn';
+    btn.title = '重试';
+    btn.setAttribute('aria-label', '重试');
+    btn.appendChild(createRetryIcon());
+    btn.addEventListener('click', () => runRetry(retry, row));
+    row.appendChild(btn);
+    scrollToBottom();
+  }
+
+  return row;
+}
+
+/**
+ * 重试被报错打断的那一步。
+ *
+ * 作答重试是同一次提问的再次尝试，不是新一轮提问：沿用对话里已有的问题气泡，
+ * 重跑成功后不会留下两条一模一样的问题。录音重试则重新走一遍打开设备与切片。
+ * 旧报错行在这里收掉——重试取代了它，再次失败会再产生一条新的。
+ */
+function runRetry(retry, row) {
+  if (ui.mode !== 'idle') {
+    toast('正在使用中，请先结束当前操作', 'error');
+    return;
+  }
+  row.remove();
+
+  if (retry.kind === 'answer') {
+    pendingRetry = true;
+    window.api.submitQuestion(retry.question).then((result) => {
+      if (result && result.ok === false) {
+        // 主进程没接住这次重试，标记不能留到下一次提问，否则那条提问不会出现在对话里
+        pendingRetry = false;
+        toast(result.message || '暂时无法重试', 'error');
+      }
+    });
+    return;
+  }
+
+  startRecording();
 }
 
 // ---------------------------------------------------------------- 控制区状态
@@ -584,7 +650,7 @@ async function startRecording() {
     [media] = await Promise.all([openSourceStream(audioUI.source), prewarmAudio()]);
   } catch (err) {
     await window.api.cancelRecording();
-    addRow('ai', captureErrorMessage(err), 'is-error');
+    addErrorRow(captureErrorMessage(err), { kind: 'record' });
     applyStatus('idle', '录音启动失败');
     return;
   }
@@ -592,14 +658,13 @@ async function startRecording() {
   if (!media.getAudioTracks().length) {
     media.getTracks().forEach((track) => track.stop());
     await window.api.cancelRecording();
-    addRow(
-      'ai',
+    addErrorRow(
       audioUI.source === 'microphone'
         ? '没有拿到麦克风音频轨，请确认设备已连接并在系统里允许本应用使用麦克风。'
         : ui.isMac
           ? '没有拿到系统音频轨。请确认已在「系统设置 → 隐私与安全性 → 屏幕录制」中勾选本应用，并重新打开应用。'
           : '没有拿到系统音频轨，无法录制电脑播放的声音。',
-      'is-error'
+      { kind: 'record' }
     );
     applyStatus('idle', '未获取到音频');
     return;
@@ -610,12 +675,11 @@ async function startRecording() {
   if (!(await audioTrackLive(stream.getAudioTracks()[0]))) {
     stream.getTracks().forEach((track) => track.stop());
     await window.api.cancelRecording();
-    addRow(
-      'ai',
+    addErrorRow(
       ui.isMac
         ? '音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试；若仍未恢复，到设置里重新检查录音权限。'
         : '音频通道没有真正启动，继续录下去会一直是静音。请重启应用后重试。',
-      'is-error'
+      { kind: 'record' }
     );
     applyStatus('idle', '音频通道未就绪');
     return;
@@ -1345,7 +1409,9 @@ window.api.on('transcript:final', ({ text }) => {
 });
 
 window.api.on('answer:start', ({ question }) => {
-  if (!userBubble && question) userBubble = addRow('user', question);
+  // 重试沿用对话里已有的问题气泡，同一次提问不在对话里出现两遍
+  if (pendingRetry) pendingRetry = false;
+  else if (!userBubble && question) userBubble = addRow('user', question);
   aiBubble = addRow('ai', '', 'is-typing');
 });
 
@@ -1356,18 +1422,18 @@ window.api.on('answer:delta', ({ text }) => {
   scrollToBottom();
 });
 
-window.api.on('answer:done', ({ aborted }) => {
+window.api.on('answer:done', ({ aborted, failed }) => {
   if (aiBubble) {
     aiBubble.classList.remove('is-typing');
     if (aborted && !aiBubble.textContent) aiBubble.textContent = '（已停止）';
+    // 一个字都没出来就失败时，留下空气泡只会让人以为还在生成；重试会重新填这一轮
+    else if (failed && !aiBubble.textContent.trim()) aiBubble.parentNode.remove();
   }
   aiBubble = null;
   userBubble = null;
 });
 
-window.api.on('error', ({ message }) => {
-  addRow('ai', message, 'is-error');
-});
+window.api.on('error', ({ message, retry }) => addErrorRow(message, retry));
 
 window.api.on('resume:status', renderResumeBadge);
 

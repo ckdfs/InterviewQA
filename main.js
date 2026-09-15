@@ -200,6 +200,7 @@ const state = {
   nextEmitId: 0, // 下一个待按顺序输出的片段 id
   results: new Map(),
   textParts: [],
+  chunkFailures: [], // 本段内转写失败的片段原因，用来把「转写失败」与「没收到声音」分开报
   silenceTail: 0,
   stopRequested: false,
   finalized: false,
@@ -216,6 +217,7 @@ function resetSession() {
   state.nextEmitId = 0;
   state.results.clear();
   state.textParts = [];
+  state.chunkFailures = [];
   state.silenceTail = 0;
   state.stopRequested = false;
   state.finalized = false;
@@ -287,7 +289,10 @@ function flushTailParallel() {
 }
 
 function onChunkDone(id, text, error) {
-  if (error) console.error(`[转写失败 #${id}] ${error}`);
+  if (error) {
+    console.error(`[转写失败 #${id}] ${error}`);
+    state.chunkFailures.push(error);
+  }
   state.results.set(id, text);
   // 按序号依次输出，保证文字顺序正确
   while (state.results.has(state.nextEmitId)) {
@@ -311,6 +316,16 @@ function maybeFinalize() {
   send('transcript:final', { text: question });
 
   if (!question) {
+    // 片段全部失败时，问题出在转写服务而不是麦克风或声音源。
+    // 这时报「没识别到内容」会把用户引去检查电脑有没有在播放，方向是错的，因此按原因分开报。
+    if (state.chunkSeq > 0 && state.chunkFailures.length >= state.chunkSeq) {
+      send('error', {
+        message: `转写失败：${state.chunkFailures[0]}`,
+        retry: { kind: 'record' },
+      });
+      setStatus('idle', '转写失败，可重试');
+      return;
+    }
     setStatus('idle', '没有识别到内容，确认电脑在播放声音后重试');
     return;
   }
@@ -522,8 +537,15 @@ async function generateAnswer(question) {
 
   const { deepseekApiKey: key, deepseekBaseUrl: baseUrl, deepseekModel: model, answer } = CONFIG;
   if (!store.hasDeepSeekKey()) {
-    send('error', { message: '还没有配置 DeepSeek API Key，点右上角「设置」补齐后即可作答' });
+    send('error', {
+      message: '还没有配置 DeepSeek API Key，点右上角「设置」补齐后即可作答',
+      retry: { kind: 'answer', question },
+    });
+    // 提前返回同样要按失败收尾：回答气泡与提问气泡都靠这条事件清掉，
+    // answering 不收回来则「正在回答中」会一直挂着，之后既不能提问也不能重试。
+    state.answering = false;
     setStatus('idle', '缺少 API Key');
+    send('answer:done', { text: '', failed: true });
     return;
   }
 
@@ -571,7 +593,10 @@ async function generateAnswer(question) {
       return;
     }
     console.error(`[回答失败] ${err.message}`);
-    send('error', { message: `调用 DeepSeek 失败：${err.message}` });
+    send('error', {
+      message: `调用 DeepSeek 失败：${err.message}`,
+      retry: { kind: 'answer', question },
+    });
     setStatus('idle', '回答失败，可重试');
     send('answer:done', { text: full, failed: true });
     return;
@@ -1200,8 +1225,12 @@ function warmUpConnection() {
       headers: { Authorization: `Bearer ${key}` },
     },
     (res) => {
-      console.log(`[预热] DeepSeek 连接就绪 HTTP ${res.statusCode}`);
-      if (res.statusCode === 401) send('error', { message: 'DeepSeek API Key 无效，请在设置里更新' });
+      if (res.statusCode === 401) {
+        console.log('[预热] DeepSeek 拒绝了这次请求 HTTP 401，请检查 API Key');
+        send('error', { message: 'DeepSeek API Key 无效，请在设置里更新' });
+      } else {
+        console.log(`[预热] DeepSeek 连接就绪 HTTP ${res.statusCode}`);
+      }
       res.resume();
     }
   );

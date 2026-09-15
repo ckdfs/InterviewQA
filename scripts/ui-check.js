@@ -97,6 +97,9 @@ const SETTINGS_VIEW = {
 /** 界面提交过的保存请求，用于校验字段是否落在后端白名单内 */
 const savedPatches = [];
 
+/** 渲染层提交过的问题，用于校验重试确实把原问题重新送了出去 */
+const submittedQuestions = [];
+
 /** 更新状态桩：先「无更新」，手动检查后变成「有新版本」，覆盖提示模式的完整交互 */
 let updateState = {
   mode: 'notify',
@@ -207,7 +210,10 @@ function registerStubs() {
     'recording:stop': () => ({ ok: true }),
     'recording:cancel': () => ({ ok: true }),
     'answer:abort': () => ({ ok: true }),
-    'question:submit': () => ({ ok: true }),
+    'question:submit': (text) => {
+      submittedQuestions.push(text);
+      return { ok: true };
+    },
   };
   for (const [channel, fn] of Object.entries(handlers)) {
     ipcMain.handle(channel, (_event, ...args) => fn(...args));
@@ -227,6 +233,25 @@ function referencedIds() {
 }
 
 app.disableHardwareAcceleration();
+
+/**
+ * 汇总结果。断言脚本里点不到元素会让 executeJavaScript 抛错，
+ * 这类失败要报成一条问题，否则整轮自测卡在未处理的 Promise 上，
+ * 日志里只剩一句看不出原因的堆栈。中断退出时拿不到覆盖字段数，因此允许缺省。
+ */
+function report(coveredFields) {
+  if (problems.length) {
+    console.error('\n界面冒烟测试未通过：');
+    problems.forEach((item) => console.error(`  ✗ ${item}`));
+    app.exit(1);
+    return;
+  }
+
+  console.log('界面冒烟测试通过：元素引用完整、引导向导、音源切换、连接自检、报错重试、设置面板与更新入口交互正常');
+  console.log(`  检查元素 ${referencedIds().length} 个，引导 3 步，设置 4 个页签`);
+  console.log(`  保存字段 ${coveredFields ? coveredFields.size : 0} 个，全部命中后端白名单`);
+  app.exit(0);
+}
 
 app.whenReady().then(async () => {
   registerStubs();
@@ -496,6 +521,117 @@ app.whenReady().then(async () => {
   const closed = await run(`return document.getElementById('settingsDrawer').hidden;`);
   if (!closed) problems.push('设置抽屉没有正常关闭');
 
+  // 7) 报错中断后的重试：报错旁边要有重试按钮，点了用原问题重跑且不重复插一条提问
+  const RETRY_Q = '你项目里最难解决的一个问题是什么';
+  const rowsBefore = await run(`
+    return {
+      user: document.querySelectorAll('.row.is-user').length,
+      ai: document.querySelectorAll('.row.is-ai').length,
+    };
+  `);
+
+  // 模拟主进程走完一轮失败：开始作答 → 报错 → 收尾
+  win.webContents.send('answer:start', { question: RETRY_Q });
+  await wait(200);
+  win.webContents.send('error', {
+    message: '调用 DeepSeek 失败：连接被重置',
+    retry: { kind: 'answer', question: RETRY_Q },
+  });
+  await wait(200);
+  win.webContents.send('answer:done', { text: '', failed: true });
+  await wait(300);
+
+  const failedTurn = await run(`
+    const btn = document.querySelector('.retry-btn');
+    return {
+      user: document.querySelectorAll('.row.is-user').length,
+      ai: document.querySelectorAll('.row.is-ai').length,
+      errorText: document.querySelector('.row .bubble.is-error')?.textContent || '',
+      retryLabel: btn ? btn.getAttribute('aria-label') : '',
+      retryTitle: btn ? btn.title : '',
+      retryIcon: Boolean(btn && btn.querySelector('svg path')),
+      retryText: btn ? btn.textContent.trim() : '有文字',
+      retryBox: btn ? [Math.round(btn.getBoundingClientRect().width), Math.round(btn.getBoundingClientRect().height)] : [0, 0],
+      retryRadius: btn ? getComputedStyle(btn).borderRadius : '',
+      retryBg: btn ? getComputedStyle(btn).backgroundColor : '',
+      emptyAi: [...document.querySelectorAll('.row.is-ai .bubble')].filter((n) => !n.textContent.trim()).length,
+    };
+  `);
+  if (failedTurn.user !== rowsBefore.user + 1) {
+    problems.push(`报错一轮应正好多一条提问，实际 ${rowsBefore.user} → ${failedTurn.user}`);
+  }
+  if (failedTurn.ai !== rowsBefore.ai + 1) {
+    problems.push(`失败后应只留报错行，实际回答行 ${rowsBefore.ai} → ${failedTurn.ai}`);
+  }
+  if (failedTurn.emptyAi) problems.push('失败后留下了空的回答气泡');
+  if (!failedTurn.errorText.includes('连接被重置')) problems.push(`报错内容没有呈现：${failedTurn.errorText}`);
+  if (failedTurn.retryLabel !== '重试') problems.push(`重试按钮没有可读的名称：${failedTurn.retryLabel}`);
+  if (failedTurn.retryTitle !== '重试') problems.push(`重试按钮缺少悬停提示：${failedTurn.retryTitle}`);
+  if (!failedTurn.retryIcon) problems.push('重试按钮里没有图标');
+  if (failedTurn.retryText) problems.push(`重试按钮应是纯图标，却带了文字：${failedTurn.retryText}`);
+  if (failedTurn.retryBox[0] > 32 || failedTurn.retryBox[1] > 32) {
+    problems.push(`重试按钮过大了：${failedTurn.retryBox.join('×')}，应是一个小圆点`);
+  }
+  if (failedTurn.retryBox[0] !== failedTurn.retryBox[1]) {
+    problems.push(`重试按钮应为正圆，实际 ${failedTurn.retryBox.join('×')}`);
+  }
+  if (failedTurn.retryRadius !== '50%' && parseFloat(failedTurn.retryRadius) < failedTurn.retryBox[0] / 2) {
+    problems.push(`重试按钮应为正圆：半径 ${failedTurn.retryRadius}，边长 ${failedTurn.retryBox[0]}`);
+  }
+  if (!failedTurn.retryBg.startsWith('rgb(229, 72, 77')) problems.push(`重试按钮应为红色：${failedTurn.retryBg}`);
+
+  await run(`document.querySelector('.retry-btn').click(); return 1;`);
+  await wait(400);
+  const afterRetry = await run(`
+    return {
+      user: document.querySelectorAll('.row.is-user').length,
+      errors: document.querySelectorAll('.row .bubble.is-error').length,
+      actions: document.querySelectorAll('.retry-btn').length,
+    };
+  `);
+  if (submittedQuestions[submittedQuestions.length - 1] !== RETRY_Q) {
+    problems.push(`重试没有把原问题重新提交：${submittedQuestions.join(' | ') || '（没有提交过）'}`);
+  }
+  if (afterRetry.errors) problems.push('点重试后旧的报错行没有收掉');
+  if (afterRetry.actions) problems.push('点重试后按钮没有收掉');
+  if (afterRetry.user !== rowsBefore.user + 1) {
+    problems.push(`重试不该再插一条相同的提问：现在 ${afterRetry.user} 条`);
+  }
+
+  // 主进程重跑这次提问时，同一个问题不该在对话里出现第二遍
+  win.webContents.send('answer:start', { question: RETRY_Q });
+  await wait(200);
+  const retryTurn = await run(`
+    return {
+      user: document.querySelectorAll('.row.is-user').length,
+      typing: document.querySelectorAll('.row.is-ai .bubble.is-typing').length,
+    };
+  `);
+  if (retryTurn.user !== rowsBefore.user + 1) {
+    problems.push(`重试后的提问被重复插入：现在 ${retryTurn.user} 条`);
+  }
+  if (retryTurn.typing !== 1) problems.push('重试后没有出现新的回答气泡');
+
+  // 8) 录音启动失败同样要给出重试（麦克风已被上面替换成必然拒绝的桩）
+  await run(`
+    document.querySelector('#sourceSwitch .seg[data-source="microphone"]').click();
+    return 1;
+  `);
+  await wait(500);
+  await run(`document.getElementById('recordBtn').click(); return 1;`);
+  await wait(900);
+  const recordFailed = await run(`
+    const btn = document.querySelector('.retry-btn');
+    return {
+      errorText: [...document.querySelectorAll('.row .bubble.is-error')].map((n) => n.textContent).join(' '),
+      retryCount: document.querySelectorAll('.retry-btn').length,
+      retryLabel: btn ? btn.getAttribute('aria-label') : '',
+    };
+  `);
+  if (!recordFailed.errorText.includes('麦克风')) problems.push(`录音失败没有说明原因：${recordFailed.errorText}`);
+  if (recordFailed.retryCount !== 1) problems.push(`录音失败应恰有一个重试入口，实际 ${recordFailed.retryCount} 个`);
+  if (recordFailed.retryLabel !== '重试') problems.push(`录音失败旁边的重试按钮没有可读名称：${recordFailed.retryLabel}`);
+
   // 界面保存过的字段必须都能被后端接受
   const coveredFields = new Set(savedPatches.flatMap((patch) => Object.keys(patch)));
   for (const field of ['answer.reasoningEffort', 'answer.maxChars', 'resume.contextMode', 'audio.source']) {
@@ -503,17 +639,11 @@ app.whenReady().then(async () => {
   }
 
   // 结果
-  if (problems.length) {
-    console.error('\n界面冒烟测试未通过：');
-    problems.forEach((item) => console.error(`  ✗ ${item}`));
-    app.exit(1);
-    return;
-  }
-
-  console.log('界面冒烟测试通过：元素引用完整、引导向导、音源切换、连接自检、设置面板与更新入口交互正常');
-  console.log(`  检查元素 ${referencedIds().length} 个，引导 3 步，设置 4 个页签`);
-  console.log(`  保存字段 ${coveredFields.size} 个，全部命中后端白名单`);
-  app.exit(0);
-});
+  report(coveredFields);
+})
+  .catch((err) => {
+    problems.push(`自测脚本中断：${err.message}`);
+    report();
+  });
 
 app.on('window-all-closed', () => app.exit(0));
