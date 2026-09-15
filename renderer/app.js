@@ -77,6 +77,9 @@ const el = {
   aboutList: $('aboutList'),
   aboutConfigBtn: $('aboutConfigBtn'),
   aboutResumeBtn: $('aboutResumeBtn'),
+  updateHint: $('updateHint'),
+  updateCheckBtn: $('updateCheckBtn'),
+  updateActionBtn: $('updateActionBtn'),
 };
 
 const ui = {
@@ -85,6 +88,7 @@ const ui = {
   setup: null,
   settings: null,
   appInfo: null,
+  update: null,
 };
 
 let stream = null;
@@ -203,6 +207,52 @@ function applyStatus(state, message) {
   if (state === 'recording') el.statusText.classList.add('is-recording');
   if (state === 'transcribing' || state === 'thinking') el.statusText.classList.add('is-busy');
   renderControls();
+}
+
+// ---------------------------------------------------------------- 自动更新
+
+/** 更新方式的说明，让使用者知道为什么有的情况要自己去下载 */
+const UPDATE_MODE_NOTE = {
+  off: '源码模式不检查更新',
+  notify: '这一版无法自行替换，发现新版本时会提示你到发布页下载',
+  auto: '发现新版本会自动下载，重启后生效',
+};
+
+function renderUpdate(snapshot) {
+  if (!snapshot) return;
+  ui.update = snapshot;
+
+  const note = UPDATE_MODE_NOTE[snapshot.mode] || '';
+  const busy = snapshot.status === 'checking' || snapshot.status === 'downloading';
+  const parts = [snapshot.message || note];
+  if (snapshot.status === 'idle' && note) parts.push(note);
+  el.updateHint.textContent = parts.filter(Boolean).join('　·　');
+  el.updateHint.className = `field-hint${
+    snapshot.status === 'error' ? ' is-error' : snapshot.status === 'downloaded' ? ' is-ok' : ''
+  }`;
+
+  el.updateCheckBtn.disabled = busy || snapshot.mode === 'off';
+
+  const action = (snapshot.actions || [])[0];
+  if (action) {
+    el.updateActionBtn.hidden = false;
+    el.updateActionBtn.textContent = action.label;
+    el.updateActionBtn.dataset.action = action.id;
+  } else {
+    el.updateActionBtn.hidden = true;
+    el.updateActionBtn.dataset.action = '';
+  }
+}
+
+async function checkUpdate() {
+  el.updateCheckBtn.disabled = true;
+  note(el.updateHint, '正在检查更新…');
+  const result = await window.api.checkUpdate();
+  if (result && result.ok === false && result.message) {
+    note(el.updateHint, result.message, 'error');
+  }
+  const snapshot = await window.api.getUpdateState();
+  renderUpdate(snapshot);
 }
 
 // ---------------------------------------------------------------- 音频采集
@@ -801,6 +851,24 @@ el.setTestBtn.addEventListener('click', async () => {
   note(el.setTestResult, result.message, result.ok ? 'ok' : 'error');
 });
 
+el.updateCheckBtn.addEventListener('click', checkUpdate);
+
+el.updateActionBtn.addEventListener('click', async () => {
+  const action = el.updateActionBtn.dataset.action;
+  if (action === 'install') {
+    // 录制中主进程会拒绝并回一条说明，这里不用先判断
+    const result = await window.api.installUpdate();
+    if (result && result.ok === false) {
+      const snapshot = await window.api.getUpdateState();
+      renderUpdate(snapshot);
+    }
+    return;
+  }
+  if (action === 'open') {
+    window.api.openUpdatePage();
+  }
+});
+
 el.setPickResumeBtn.addEventListener('click', async () => {
   const result = await window.api.pickResumeFiles();
   if (!result.ok) return;
@@ -935,6 +1003,17 @@ window.api.on('error', ({ message }) => {
 
 window.api.on('resume:status', renderResumeBadge);
 
+window.api.on('update', (snapshot) => {
+  renderUpdate(snapshot);
+  // 只有可自动安装的那一版才提示重启；提示模式静静留在「关于」页即可
+  if (snapshot.status === 'downloaded') {
+    toast(`新版本 ${snapshot.latestVersion} 已下载，重启后生效`, 'ok', {
+      label: '重启并安装',
+      onClick: () => window.api.installUpdate(),
+    });
+  }
+});
+
 // ---------------------------------------------------------------- 启动
 
 async function refreshAll() {
@@ -946,11 +1025,12 @@ async function refreshAll() {
 }
 
 async function boot() {
-  const [info, state, resumeStatus, status] = await Promise.all([
+  const [info, state, resumeStatus, status, updateState] = await Promise.all([
     window.api.getAppInfo(),
     window.api.getSetupState(),
     window.api.getResumeStatus(),
     window.api.getStatus(),
+    window.api.getUpdateState(),
   ]);
 
   ui.appInfo = info;
@@ -959,6 +1039,7 @@ async function boot() {
 
   applyStatus(status.state, status.message);
   renderResumeBadge(resumeStatus);
+  renderUpdate(updateState);
 
   if (state.needsSetup) {
     setup.show();

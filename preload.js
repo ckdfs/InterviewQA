@@ -36,6 +36,12 @@ contextBridge.exposeInMainWorld('api', {
   revealConfig: () => ipcRenderer.invoke('settings:revealConfig'),
   testDeepSeek: () => ipcRenderer.invoke('settings:testDeepSeek'),
 
+  // 自动更新
+  getUpdateState: () => ipcRenderer.invoke('update:state'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  openUpdatePage: () => ipcRenderer.invoke('update:openPage'),
+
   // 主进程事件订阅，返回取消订阅函数
   on: (channel, callback) => {
     const allowed = [
@@ -46,6 +52,7 @@ contextBridge.exposeInMainWorld('api', {
       'answer:delta',
       'answer:done',
       'resume:status',
+      'update',
       'error',
     ];
     if (!allowed.includes(channel)) return () => {};

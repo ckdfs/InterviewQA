@@ -6,6 +6,14 @@ directories:
   output: dist
   buildResources: build
 
+# 自动更新的发布源。打包时会在应用内写入 resources/app-update.yml，
+# 运行时的 electron-updater 靠它定位更新清单（latest.yml / latest-mac.yml）。
+# 这里只声明来源，实际上传由 CI 的 release 任务完成。
+publish:
+  - provider: github
+    owner: ckdfs
+    repo: InterviewQA
+
 # 只打包运行必需的文件。
 # resume/ 与 config.json 属于使用者个人材料，绝不进包；
 # 打包版的配置与简历固定落在系统用户目录（Windows: %APPDATA%\InterviewQA，
@@ -17,6 +25,7 @@ files:
   - resume.js
   - resume-context.js
   - transcript-merge.js
+  - update.js
   - package.json
   - config.example.json
   - renderer/**/*
@@ -44,11 +53,23 @@ electronLanguages:
 afterPack: scripts/after-pack.js
 
 win:
+  # 两个目标各有用途：
+  #   nsis     安装版，自动更新只支持这一种（Squirrel 需要能替换安装目录下的文件）
+  #   portable 免安装版，双击即用，但自身无法被替换，只能提示到发布页手动下载
   target:
+    - target: nsis
+      arch:
+        - x64
     - target: portable
       arch:
         - x64
-  artifactName: ${productName}-${version}-win-x64-portable.${ext}
+
+nsis:
+  artifactName: ${productName}-${version}-win-x64-setup.${ext}
+  oneClick: true
+  perMachine: false
+  # 卸载时保留用户数据：里面是这个人的 API Key 与简历，删掉代价太大
+  deleteAppDataOnUninstall: false
 
 portable:
   artifactName: ${productName}-${version}-win-x64-portable.${ext}

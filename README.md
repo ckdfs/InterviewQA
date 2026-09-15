@@ -66,23 +66,54 @@ Electron 39 起 Chromium 默认改用 CoreAudio Tap 采集桌面音频。该路�
 
 ```bash
 npm run icon          # 生成应用图标 build/icon.png（已提交，一般无需重跑）
-npm run build:win     # Windows 免安装 exe → dist/*.exe
+npm run build:win     # Windows 安装版 + 免安装版 → dist/*.exe
 npm run build:mac     # macOS dmg + zip（arm64 与 x64）→ dist/
 npm run build:mac:arm64
 npm run build:mac:x64
 ```
 
+> macOS 的两个架构要在**同一次** `electron-builder` 调用里构建。更新清单只有一个文件名
+> `latest-mac.yml`，分成两次构建时后一次会整体覆盖前一次，清单里只剩一个架构，
+> 另一半用户从此收不到新版本。
+
 推到 GitHub 后 `.github/workflows/build.yml` 自动构建：
 
-- 任何 push / PR：先跑语法检查、注入策略自测与界面冒烟测试，通过后再并行构建 Windows（x64）与 macOS（arm64 / x64）；
-  mac 任务构建完会断言 Info.plist 权限键与 ad-hoc 签名有效性——签名无效的包在 Apple Silicon 上会被 Gatekeeper 判为「已损坏」，
-  这一步把它挡在发布之前。产物在 Actions 页面可直接下载；
+- 任何 push / PR：先跑语法检查、注入策略自测、转写拼接自测、更新判定自测与界面冒烟测试，
+  通过后再构建 Windows（x64）与 macOS（arm64 + x64）；
+  mac 任务构建完会断言 Info.plist 权限键、ad-hoc 签名有效性、更新清单包含两个架构——
+  签名无效的包在 Apple Silicon 上会被 Gatekeeper 判为「已损坏」，这一步把它挡在发布之前。
+  产物在 Actions 页面可直接下载；
 - 打包任务只在 checks 全部通过后才启动，避免「代码改了但跑不起来」还占用构建机；
-- 打 tag 后额外创建一个 Release，把安装包附上去：
+- 打 tag 后额外创建一个 Release，把安装包、更新清单与增量包一起附上去：
 
 ```bash
-git tag v1.1.0 && git push --tags
+git tag v1.2.0 && git push --tags
 ```
+
+### 自动更新
+
+应用内置 `electron-updater`，更新源就是本仓库的 Releases（配置在 `electron-builder.yml`
+的 `publish` 段，打包时会写进应用内的 `resources/app-update.yml`）。更新方式由平台、
+运行形态与签名类型共同决定：
+
+| 场景 | 行为 |
+| --- | --- |
+| Windows 安装版（`*-win-x64-setup.exe`） | 自动下载，重启后完成替换 |
+| Windows 免安装版（`*-win-x64-portable.exe`） | 只提示新版本，点「打开下载页」自行下载 |
+| macOS，已用 Developer ID 签名 | 自动下载，重启后完成替换 |
+| macOS，ad-hoc 签名或未签名 | 只提示新版本，点「打开下载页」自行下载 |
+| 源码模式（`node start.js`） | 不检查更新 |
+
+判定逻辑集中在 `update.js` 的 `decideMode()`，纯函数、可断言，改动时先跑 `npm run test:update`。
+
+**为什么未签名的 macOS 版不能自动更新**：electron-updater 在 macOS 上把 zip 交给系统自带的
+Squirrel.Mac 安装，Squirrel 会校验下载包的签名是否满足**当前运行应用的指定要求**。
+ad-hoc 签名的应用，指定要求就是它自己那份 cdhash，换一个构建必然对不上，更新会被直接拒绝。
+因此只有配上 Developer ID 证书（仓库 Secrets 里的 `CSC_LINK` / `CSC_KEY_PASSWORD`）
+才会启用 macOS 的自动安装，其余情况退回到「提示 + 打开下载页」，不去做注定失败的事。
+
+**为什么免安装版不能自动更新**：它本身是运行时解压出来的单个 exe，没有可被替换的安装目录。
+装一次安装版即可获得自动更新。
 
 ### macOS 签名
 
@@ -101,11 +132,12 @@ npm run selftest      # 用 stt/test_sample.wav 模拟一次录音，跑通切�
 npm run test:context  # 简历注入策略自测：默认用合成档案夹具，对 20 条问题断言注入模式（纯本地关键词判定，不外呼）
 npm run test:resume   # 简历链路自检：PDF 提取、源文件识别、首次解析、缓存命中与失效、无 Key 时复用缓存
 npm run test:merge    # 转写拼接自测：切片重叠去重（含同音字造成的重叠）
-npm run test:ui       # 界面冒烟测试：元素引用、引导向导、设置面板、保存字段白名单
+npm run test:update   # 自动更新自测：签名判定、更新方式、状态迁移、安装条件（含录制中拒绝重启）
+npm run test:ui       # 界面冒烟测试：元素引用、引导向导、设置面板、更新入口、保存字段白名单
 npm run test:stt      # 本地 Whisper 链路自测（需先建好 .venv）
 ```
 
-以上四项都不联网、不需要 API Key，可直接在 CI 里跑；PDF 夹具由 `scripts/mini-pdf.js`
+以上几项都不联网、不需要 API Key，可直接在 CI 里跑；PDF 夹具由 `scripts/mini-pdf.js`
 在运行时手写生成，注入策略自测用 `scripts/fixtures/sample-profile.md` 这份合成档案，
 仓库里既不放二进制样本，也不依赖任何个人材料。
 
@@ -179,6 +211,7 @@ resume.js               简历加载：多文件提取文字 → DeepSeek 整理
 resume-context.js       按问题类型决定注入哪部分档案
 renderer/               聊天界面、引导向导、设置面板、AudioWorklet PCM 采集
 preload.js              渲染进程安全桥
+update.js               自动更新：更新方式判定、状态机、检查与安装
 stt/worker.py           本地兜底转写进程（预加载模型，行式 JSON 协议）
 scripts/after-pack.js   macOS ad-hoc 签名
 scripts/make-icon.js    生成应用图标
@@ -200,3 +233,7 @@ scripts/make-icon.js    生成应用图标
 - **简历解析失败**：多半是扫描件（图片型 PDF）提取不到文字，换成文本版 PDF 或直接放 txt/md。
 - **回答没生成完就停了**：这是「停止回答」的正常行为，已生成部分会保留。
 - **想更长/更短的回答**：在设置里改「回答字数上限」，或直接改 `config.json` 的 `answer.maxChars`。
+- **检查更新失败**：设置 →「关于」看更新方式那一行的说明。公司网络若拦截 `github.com`，
+  更新检查会连不上；这种网络环境下只能手动到 Releases 页面下载。
+- **免安装版没有自动更新**：这是有意的——单文件形态无法自我替换。改用 `*-win-x64-setup.exe`
+  安装一次即可获得自动更新，安装时不会动 `%APPDATA%\InterviewQA` 下的配置与简历。

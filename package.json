@@ -1,7 +1,7 @@
 {
   "name": "interview-qa",
   "productName": "InterviewQA",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "面试问答助手：录制电脑播放的声音 → MiMo ASR 边录边转 → DeepSeek 结合简历流式作答",
   "main": "main.js",
   "private": true,
@@ -14,6 +14,7 @@
     "selftest": "node start.js --selftest",
     "test:context": "node test-resume-context.js",
     "test:merge": "node scripts/check-transcript-merge.js",
+    "test:update": "node scripts/check-update.js",
     "test:resume": "node scripts/check-resume-pipeline.js",
     "test:stt": "node scripts/run-stt-test.js",
     "test:ui": "node scripts/launch.js --script scripts/ui-check.js",
@@ -31,6 +32,7 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "pdf-parse": "^2.4.5"
   }
 }

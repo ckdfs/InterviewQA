@@ -14,11 +14,17 @@ const fs = require('fs');
 const os = require('os');
 const https = require('https');
 const { URL } = require('url');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { loadResume, findSources, resumeCacheUsable } = require('./resume');
 const { buildResumeContext } = require('./resume-context');
 const { mergeWithOverlapDedupe } = require('./transcript-merge');
 const { ConfigStore } = require('./config');
+const {
+  PORTABLE_ENV,
+  parseSigningKind,
+  decideMode,
+  createUpdater,
+} = require('./update');
 
 const APP_ROOT = __dirname;
 const IS_MAC = process.platform === 'darwin';
@@ -1179,6 +1185,49 @@ ipcMain.handle('settings:testDeepSeek', () => {
   });
 });
 
+// ------------------------------------------------------------------ 自动更新
+//
+// 更新方式由「是否打包 + 平台 + 运行形态 + 签名类型」决定，具体的判定与状态机
+// 都在 update.js 里，这里只负责把它和真实的更新器、界面、退出流程接起来。
+
+/** 打包后的免安装版会把自身路径放进这个变量，这种形态无法自我替换 */
+const IS_PORTABLE = IS_WIN && !!process.env[PORTABLE_ENV];
+
+/** macOS 上读一次自身签名类型；其他平台不适用 */
+function detectSigningKind() {
+  if (!IS_MAC || !app.isPackaged) return 'n/a';
+  // process.execPath 是 …/X.app/Contents/MacOS/X，往上三层就是 bundle 根目录
+  const bundle = path.resolve(process.execPath, '..', '..', '..');
+  const res = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', bundle], { encoding: 'utf8' });
+  // codesign 把结果打在标准错误上，退出码非零时内容照样可用
+  return parseSigningKind(`${res.stdout || ''}\n${res.stderr || ''}`);
+}
+
+const SIGNING_KIND = detectSigningKind();
+const UPDATE_MODE = decideMode({
+  isPackaged: app.isPackaged,
+  platform: process.platform,
+  portable: IS_PORTABLE,
+  signingKind: SIGNING_KIND,
+});
+
+const appUpdater = createUpdater({
+  mode: UPDATE_MODE,
+  currentVersion: app.getVersion(),
+  updater: UPDATE_MODE === 'off' ? null : require('electron-updater').autoUpdater,
+  // 录制中不重启：用户可能正对着面试题，换版本比晚几分钟重要得多
+  canInstall: () => !state.recording,
+  openPage: (url) => shell.openExternal(url),
+  onState: (snapshot) => send('update', snapshot),
+});
+
+console.log(`[更新] 方式=${UPDATE_MODE} 签名=${SIGNING_KIND} 免安装版=${IS_PORTABLE}`);
+
+ipcMain.handle('update:state', () => appUpdater.getState());
+ipcMain.handle('update:check', () => appUpdater.check());
+ipcMain.handle('update:install', () => ({ ok: appUpdater.install() }));
+ipcMain.handle('update:openPage', () => ({ ok: appUpdater.openDownloadPage() }));
+
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
   platform: process.platform,
@@ -1189,6 +1238,9 @@ ipcMain.handle('app:info', () => ({
   userDir: USER_DIR,
   engine: (CONFIG.stt && CONFIG.stt.engine) || 'mimo',
   localEngineAvailable: !app.isPackaged && !!localPythonPath(),
+  updateMode: UPDATE_MODE,
+  portable: IS_PORTABLE,
+  signingKind: SIGNING_KIND,
 }));
 
 
@@ -1431,6 +1483,7 @@ app.whenReady().then(() => {
   }
   warmUpConnection();
   initResume(); // 异步：首次解析简历，之后复用缓存，不阻塞界面
+  appUpdater.start(); // 延迟一段时间再查更新，不和首屏抢网络
   if (process.argv.includes('--selftest')) runSelfTest();
 });
 
@@ -1444,5 +1497,6 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
+  appUpdater.stop();
   if (pool) pool.killAll();
 });

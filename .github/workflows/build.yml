@@ -18,10 +18,11 @@ concurrency:
 env:
   # 不做证书自动发现：托管 runner 上没有开发者证书，自动发现只会拖慢构建。
   # 需要正式签名时，在仓库 Secrets 里配置 CSC_LINK / CSC_KEY_PASSWORD。
+  # macOS 的自动安装依赖 Developer ID 签名，配上之后无需改代码即可生效。
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
 jobs:
-  # 先把静态检查、简历链路自检与界面冒烟测试跑一遍，
+  # 先把静态检查、简历链路自检、转写拼接自检、更新判定自检与界面冒烟测试跑一遍，
   # 把「改了代码但没跑起来」这类问题挡在打包之前，不浪费构建机时间
   checks:
     runs-on: ubuntu-latest
@@ -37,7 +38,7 @@ jobs:
       - name: 语法检查
         run: |
           for file in main.js config.js preload.js resume.js resume-context.js \
-                      transcript-merge.js start.js test-resume-context.js scripts/*.js; do
+                      transcript-merge.js update.js start.js test-resume-context.js scripts/*.js; do
             echo "检查 $file"
             node --check "$file"
           done
@@ -47,6 +48,11 @@ jobs:
 
       - name: 转写拼接自测
         run: npm run test:merge
+
+      # 更新判定与状态迁移全是纯逻辑，不联网也能断言，
+      # 把「什么情况下允许自我替换」这类判断钉死在用例里
+      - name: 自动更新自测
+        run: npm run test:update
 
       # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
       # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
@@ -73,7 +79,7 @@ jobs:
       - name: 简历链路自检（解析 / 缓存 / 失效 / 注入）
         run: npm run test:resume
 
-      - name: 界面冒烟测试（引导向导 + 设置面板）
+      - name: 界面冒烟测试（引导向导 + 设置面板 + 更新入口）
         run: |
           sudo apt-get update -qq
           # Electron 在无显示环境下运行需要的库；不同 Ubuntu 版本包名不同，逐个容错安装
@@ -87,7 +93,7 @@ jobs:
   build-windows:
     needs: checks
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -96,8 +102,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
-      # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
       - name: 缓存 Electron 二进制
         uses: actions/cache@v4
         with:
@@ -118,16 +122,34 @@ jobs:
           echo "::error::安装依赖连续三次失败"
           exit 1
 
-      - name: 打包 Windows 免安装版
+      # 安装版与免安装版一起出：安装版支持自动更新，免安装版双击即用
+      - name: 打包 Windows（安装版 + 免安装版）
         run: npx electron-builder --win --x64 --publish never
 
       - name: 校验产物
         shell: bash
         run: |
           ls -lh dist
-          count=$(ls dist/*.exe 2>/dev/null | wc -l)
-          if [ "$count" -eq 0 ]; then
-            echo "::error::没有生成 .exe 产物"
+          for pattern in "*-win-x64-setup.exe" "*-win-x64-portable.exe"; do
+            if ! ls dist/$pattern >/dev/null 2>&1; then
+              echo "::error::缺少产物 $pattern"
+              exit 1
+            fi
+          done
+
+      # 更新清单指向哪个包，用户就会收到哪个包。断言它指向安装版，
+      # 免安装版没有能力自我替换，不能被写进更新清单。
+      - name: 校验更新元数据
+        shell: bash
+        run: |
+          test -f dist/latest.yml
+          cat dist/latest.yml
+          if ! grep -q "win-x64-setup.exe" dist/latest.yml; then
+            echo "::error::更新清单没有指向安装版"
+            exit 1
+          fi
+          if grep -q "portable" dist/latest.yml; then
+            echo "::error::更新清单不该包含免安装版"
             exit 1
           fi
 
@@ -135,7 +157,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: InterviewQA-windows-x64
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -154,16 +179,8 @@ jobs:
 
   build-mac:
     needs: checks
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            artifact: mac-arm64
-          - arch: x64
-            artifact: mac-x64
     runs-on: macos-14
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -172,8 +189,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Electron 的二进制走网络下载，托管 runner 上偶发 504 会让整个构建失败。
-      # 先按平台缓存，再对安装本身做重试，把瞬时网络故障挡掉。
       - name: 缓存 Electron 二进制
         uses: actions/cache@v4
         with:
@@ -194,85 +209,103 @@ jobs:
           echo "::error::安装依赖连续三次失败"
           exit 1
 
-      - name: 打包 macOS（${{ matrix.arch }}）
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+      # 两个架构必须在同一次调用里构建。更新清单只有一个文件名 latest-mac.yml，
+      # 分成两次构建时，后一次会把前一次的内容整体覆盖，更新清单里只剩一个架构，
+      # 另一半用户从此收不到新版本。
+      - name: 打包 macOS（arm64 + x64）
+        run: npx electron-builder --mac --arm64 --x64 --publish never
 
       # electron-builder 对 x64 用 dist/mac、对其他架构用 dist/mac-<arch>，
-      # 写死目录名会在 x64 上找不到产物，这里按实际输出定位。
-      - name: 定位打包输出
-        id: locate
-        run: |
-          count=$(ls -d dist/mac* 2>/dev/null | wc -l | tr -d ' ')
-          if [ "$count" -ne 1 ]; then
-            echo "::error::期望恰好一个 mac 输出目录，实际 $count 个"
-            ls -d dist/mac* 2>/dev/null || true
-            exit 1
-          fi
-          DIR=$(ls -d dist/mac* | head -1)
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "输出目录：$DIR"
-
+      # 写死目录名会在其中一个架构上找不到产物。
       - name: 校验产物与签名
         run: |
           ls -lh dist
           for kind in dmg zip; do
-            if ! ls dist/*.$kind >/dev/null 2>&1; then
-              echo "::error::没有生成 .$kind 产物"
+            for arch in arm64 x64; do
+              if ! ls dist/*-mac-${arch}.${kind} >/dev/null 2>&1; then
+                echo "::error::缺少 ${arch} 的 .${kind} 产物"
+                exit 1
+              fi
+            done
+          done
+
+          for app in "dist/mac-arm64/InterviewQA.app" "dist/mac/InterviewQA.app"; do
+            if [ ! -d "$app" ]; then
+              echo "::error::没有找到 $app"
+              exit 1
+            fi
+            echo "== ${app} 权限声明 =="
+            plutil -p "$app/Contents/Info.plist" | grep -E "NSAudioCaptureUsageDescription|NSMicrophoneUsageDescription|LSMinimumSystemVersion|CFBundleIdentifier"
+            echo "== ${app} 代码签名 =="
+            codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier"
+            # 签名无效的包在 Apple Silicon 上会被 Gatekeeper 判为「已损坏」，
+            # 这一步把问题直接挡在发布之前。
+            codesign --verify --verbose=2 "$app"
+          done
+
+      - name: 校验更新元数据
+        run: |
+          test -f dist/latest-mac.yml
+          cat dist/latest-mac.yml
+          # 更新清单少一个架构，那一半用户就永远收不到新版本
+          for arch in arm64 x64; do
+            if ! grep -q -- "-mac-${arch}.zip" dist/latest-mac.yml; then
+              echo "::error::更新清单里没有 ${arch} 的包"
               exit 1
             fi
           done
-          APP="${{ steps.locate.outputs.dir }}/InterviewQA.app"
-          if [ ! -d "$APP" ]; then
-            echo "::error::没有找到 $APP"
-            exit 1
-          fi
-          echo "== 权限声明 =="
-          plutil -p "$APP/Contents/Info.plist" | grep -E "NSAudioCaptureUsageDescription|NSMicrophoneUsageDescription|LSMinimumSystemVersion|CFBundleIdentifier"
-          echo "== 代码签名 =="
-          codesign -dv "$APP" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier"
-          # 签名无效的包在 Apple Silicon 上会被 Gatekeeper 判为「已损坏」，
-          # 这一步把问题直接挡在发布之前。
-          codesign --verify --verbose=2 "$APP"
+          # 运行时靠包内的 app-update.yml 定位更新源，缺了它检查更新必然失败
+          for app in "dist/mac-arm64/InterviewQA.app" "dist/mac/InterviewQA.app"; do
+            test -f "$app/Contents/Resources/app-update.yml"
+            grep -q "provider: github" "$app/Contents/Resources/app-update.yml"
+          done
 
       # 个人材料绝不能进分发包。这里直接断言 app.asar 的实际内容，
       # 比只检查配置里的 files 白名单更可靠——配置对不代表打出来的包就对。
       - name: 断言包内不含个人材料
         run: |
-          APP="${{ steps.locate.outputs.dir }}/InterviewQA.app"
-          npx asar list "$APP/Contents/Resources/app.asar" > /tmp/asar-list.txt
-          echo "== 顶层内容 =="
-          grep -vE "^/node_modules" /tmp/asar-list.txt
+          for app in "dist/mac-arm64/InterviewQA.app" "dist/mac/InterviewQA.app"; do
+            echo "== ${app} 顶层内容 =="
+            npx asar list "$app/Contents/Resources/app.asar" > /tmp/asar-list.txt
+            grep -vE "^/node_modules" /tmp/asar-list.txt
 
-          for pattern in "/resume/" "/config.json" "\.pdf$" "\.docx$"; do
-            if grep -qE "$pattern" /tmp/asar-list.txt; then
-              echo "::error::包内出现不该有的内容：$pattern"
+            for pattern in "/resume/" "/config.json" "\.pdf$" "\.docx$"; do
+              if grep -qE "$pattern" /tmp/asar-list.txt; then
+                echo "::error::${app} 包内出现不该有的内容：$pattern"
+                exit 1
+              fi
+            done
+
+            # 更新模块必须真的进包，否则运行时根本走不到检查更新
+            if ! grep -q "^/update.js$" /tmp/asar-list.txt; then
+              echo "::error::${app} 包内缺少 update.js"
+              exit 1
+            fi
+
+            rm -rf /tmp/asar-dump
+            mkdir -p /tmp/asar-dump
+            npx asar extract "$app/Contents/Resources/app.asar" /tmp/asar-dump
+            if grep -rilE "sk-[a-z0-9]{20}" /tmp/asar-dump; then
+              echo "::error::${app} 包内检出疑似 API Key"
               exit 1
             fi
           done
-
-          mkdir -p /tmp/asar-dump
-          npx asar extract "$APP/Contents/Resources/app.asar" /tmp/asar-dump
-          if grep -rilE "sk-[a-z0-9]{20}" /tmp/asar-dump; then
-            echo "::error::包内检出疑似 API Key"
-            exit 1
-          fi
           echo "包内未发现个人材料与密钥"
 
       # 分发包「能签名」不等于「能启动」：未签名或权限键缺失时应用会在启动阶段就退出。
       # 这里真跑一次打包后的二进制，断言它进入引导分支。
+      # 托管 runner 只有 arm64 机型，因此只跑宿主架构那一份；
+      # 跨架构运行要靠 Rosetta，跑出来的结果也不能代表目标机型。
       - name: 冒烟启动打包应用
         run: |
           HOST=$(uname -m)
-          TARGET="${{ matrix.arch }}"
-          # 托管 runner 只有 arm64 机型，x64 产物要靠 Rosetta 才跑得起来，
-          # 而跨架构运行的结果不能代表目标机型，因此只在两者一致时才做启动冒烟。
-          if [ "$HOST" != "$TARGET" ]; then
-            # 变量一律加花括号定界：macOS runner 自带 bash 3.2，单词形式后面紧跟多字节
-            # 标点（、，）时会把标点当成变量名的一部分，导致变量值在日志里消失。
-            echo "宿主为 ${HOST}、产物为 ${TARGET}，跨架构运行无法代表目标机型，跳过启动冒烟"
-            exit 0
+          if [ "${HOST}" = "arm64" ]; then
+            DIR=dist/mac-arm64
+          else
+            DIR=dist/mac
           fi
-          BIN="${{ steps.locate.outputs.dir }}/InterviewQA.app/Contents/MacOS/InterviewQA"
+          echo "宿主架构 ${HOST}，对 ${DIR} 下的应用做启动冒烟"
+          BIN="${DIR}/InterviewQA.app/Contents/MacOS/InterviewQA"
           rm -f /tmp/app-start.log
           "$BIN" > /tmp/app-start.log 2>&1 &
           PID=$!
@@ -285,6 +318,11 @@ jobs:
             echo "::error::打包后的应用没有进入启动流程，分发包不可用"
             exit 1
           fi
+          # 更新方式的判定结果要出现在启动日志里，配置改错时能第一时间看到
+          if ! grep -q "\[更新\] 方式=" /tmp/app-start.log; then
+            echo "::error::启动日志里没有更新方式的判定结果"
+            exit 1
+          fi
           echo "== 首次启动判定 =="
           grep -q "尚未完成初始化" /tmp/app-start.log \
             && echo "干净环境下正确进入引导流程" \
@@ -293,10 +331,12 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: InterviewQA-${{ matrix.artifact }}
+          name: InterviewQA-mac
           path: |
             dist/*.dmg
             dist/*.zip
+            dist/*.blockmap
+            dist/latest-mac.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -304,7 +344,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ matrix.artifact }}
+          name: diagnostics-mac
           path: |
             dist/*.yml
             dist/*.yaml
@@ -326,6 +366,26 @@ jobs:
       - name: 列出待发布文件
         run: ls -lh artifacts
 
+      # 更新清单与增量包是自动更新的全部依据，缺了它们客户端只会一直报错，
+      # 因此发布前先确认文件齐了再上传。增量包只影响下载量，缺了会退回整包下载，
+      # 不阻断发布，这里只提示。
+      - name: 校验待发布内容完整
+        run: |
+          for required in latest.yml latest-mac.yml; do
+            if [ ! -f "artifacts/${required}" ]; then
+              echo "::error::缺少更新清单 ${required}"
+              exit 1
+            fi
+          done
+          for arch in arm64 x64; do
+            if ! grep -q -- "-mac-${arch}.zip" artifacts/latest-mac.yml; then
+              echo "::error::macOS 更新清单里没有 ${arch} 的包"
+              exit 1
+            fi
+          done
+          echo "== 增量包 =="
+          ls -lh artifacts/*.blockmap 2>/dev/null || echo "::warning::没有增量包，更新会退回整包下载"
+
       - name: 创建 GitHub Release 并附上安装包
         uses: softprops/action-gh-release@v2
         with:
@@ -333,6 +393,8 @@ jobs:
             artifacts/*.exe
             artifacts/*.dmg
             artifacts/*.zip
+            artifacts/*.blockmap
+            artifacts/latest*.yml
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -74,6 +74,18 @@ const SETTINGS_VIEW = {
 /** 界面提交过的保存请求，用于校验字段是否落在后端白名单内 */
 const savedPatches = [];
 
+/** 更新状态桩：先「无更新」，手动检查后变成「有新版本」，覆盖提示模式的完整交互 */
+let updateState = {
+  mode: 'notify',
+  status: 'idle',
+  currentVersion: '1.2.0-smoke',
+  latestVersion: '',
+  percent: 0,
+  message: '有新版本时提示，由你自行下载安装',
+  actions: [],
+};
+let openedUpdatePage = 0;
+
 function validatePatch(patch) {
   if (!patch || typeof patch !== 'object') {
     problems.push('settings:save 没有收到字段对象');
@@ -100,6 +112,9 @@ function registerStubs() {
       userDir: '/tmp/interviewqa-smoke',
       engine: 'mimo',
       localEngineAvailable: false,
+      updateMode: 'notify',
+      portable: false,
+      signingKind: process.platform === 'darwin' ? 'adhoc' : 'n/a',
     }),
     'setup:get': () => SETUP_STATE,
     'setup:save': (patch) => {
@@ -119,6 +134,22 @@ function registerStubs() {
     'settings:revealResumeDir': () => ({ ok: true }),
     'settings:revealConfig': () => ({ ok: true }),
     'settings:testDeepSeek': () => ({ ok: true, message: 'DeepSeek 连接正常' }),
+    'update:state': () => updateState,
+    'update:check': () => {
+      updateState = {
+        ...updateState,
+        status: 'available',
+        latestVersion: '9.9.9',
+        message: '发现新版本 9.9.9',
+        actions: [{ id: 'open', label: '打开下载页' }],
+      };
+      return { ok: true };
+    },
+    'update:install': () => ({ ok: false }),
+    'update:openPage': () => {
+      openedUpdatePage += 1;
+      return { ok: true };
+    },
     'capture:status': () => SETUP_STATE.privacy || { granted: true },
     'capture:openPrivacy': () => ({ ok: true }),
     'recording:start': () => ({ ok: true }),
@@ -261,6 +292,38 @@ app.whenReady().then(async () => {
   const saved = await run(`return document.getElementById('settingsNote').textContent;`);
   if (saved !== '已保存') problems.push(`保存设置后的提示异常：${saved}`);
 
+  // 6) 关于页签里的自动更新入口
+  await run(`document.querySelector('#settingsTabs .tab[data-tab="about"]').click(); return 1;`);
+  await wait(300);
+  const updateIdle = await run(`
+    return {
+      hint: document.getElementById('updateHint').textContent,
+      checkDisabled: document.getElementById('updateCheckBtn').disabled,
+      actionHidden: document.getElementById('updateActionBtn').hidden,
+    };
+  `);
+  if (!updateIdle.hint.trim()) problems.push('关于页的更新状态没有渲染');
+  if (updateIdle.checkDisabled) problems.push('提示模式下「检查更新」不应被禁用');
+  if (!updateIdle.actionHidden) problems.push('没有待处理动作时不该显示操作按钮');
+
+  await run(`document.getElementById('updateCheckBtn').click(); return 1;`);
+  await wait(600);
+  const updateFound = await run(`
+    return {
+      hint: document.getElementById('updateHint').textContent,
+      actionHidden: document.getElementById('updateActionBtn').hidden,
+      actionLabel: document.getElementById('updateActionBtn').textContent,
+      actionId: document.getElementById('updateActionBtn').dataset.action,
+    };
+  `);
+  if (!updateFound.hint.includes('9.9.9')) problems.push(`检查更新后的状态没有回显版本号：${updateFound.hint}`);
+  if (updateFound.actionHidden) problems.push('发现新版本后应出现操作按钮');
+  if (updateFound.actionLabel !== '打开下载页') problems.push(`提示模式下的操作应为打开下载页：${updateFound.actionLabel}`);
+
+  await run(`document.getElementById('updateActionBtn').click(); return 1;`);
+  await wait(400);
+  if (openedUpdatePage !== 1) problems.push(`点「打开下载页」没有走到主进程，调用次数 ${openedUpdatePage}`);
+
   await run(`document.getElementById('settingsCloseBtn').click(); return 1;`);
   await wait(400);
   const closed = await run(`return document.getElementById('settingsDrawer').hidden;`);
@@ -280,7 +343,7 @@ app.whenReady().then(async () => {
     return;
   }
 
-  console.log('界面冒烟测试通过：元素引用完整、引导向导与设置面板交互正常');
+  console.log('界面冒烟测试通过：元素引用完整、引导向导、设置面板与更新入口交互正常');
   console.log(`  检查元素 ${referencedIds().length} 个，引导 3 步，设置 4 个页签`);
   console.log(`  保存字段 ${coveredFields.size} 个，全部命中后端白名单`);
   app.exit(0);

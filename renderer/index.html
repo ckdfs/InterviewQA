@@ -299,6 +299,18 @@
 
         <section class="tabpane" data-tabpane="about">
           <dl class="kv" id="aboutList"></dl>
+
+          <hr class="sep" />
+
+          <div class="field">
+            <label>版本更新</label>
+            <p class="field-hint" id="updateHint">正在读取更新状态…</p>
+            <div class="inline-row">
+              <button id="updateCheckBtn" class="btn btn-ghost" type="button">检查更新</button>
+              <button id="updateActionBtn" class="btn btn-primary" type="button" hidden></button>
+            </div>
+          </div>
+
           <div class="inline-row">
             <button id="aboutConfigBtn" class="btn btn-ghost" type="button">打开配置位置</button>
             <button id="aboutResumeBtn" class="btn btn-ghost" type="button">打开简历目录</button>
